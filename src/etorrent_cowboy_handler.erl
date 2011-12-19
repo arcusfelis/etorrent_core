@@ -1,5 +1,9 @@
 -module(etorrent_cowboy_handler).
 
+-ifdef(TEST).
+-include_lib("proper/include/proper.hrl").
+-include_lib("eunit/include/eunit.hrl").
+-endif.
 
 -export([init/3, handle/2, terminate/2]).
 
@@ -56,7 +60,8 @@ handle(Req, State) ->
 
 handle_static_file(Req, State, Path) ->
     Priv = code:priv_dir(etorrent),
-    F = filename:join([Priv, "webui", "htdocs" | sanitize(Path)]),
+    {ok, Sanitized} = sanitize(Path),
+    F = filename:join([Priv, "webui", "htdocs" | Sanitized]),
     case file:read_file(F) of
         {ok, B} ->
             MimeType = case mimetypes:filename(F) of
@@ -183,15 +188,15 @@ sanitize(Path) ->
         true ->
             dot_check(Path);
         false ->
-            "index.html"
+            {error, unallowed_characters}
     end.
 
 dot_check(Path) ->
     case dot_check1(Path) of
         ok ->
-            Path;
+            {ok, Path};
         fail ->
-            "index.html"
+            {error, dot_check}
     end.
 
 dot_check1([$., $/ | _]) -> fail;
@@ -210,5 +215,95 @@ allowed(C) when C == $/;
                 C == $.          -> true;
 allowed(_C)                      -> false.
 
+-ifdef(EUNIT).
+-ifdef(PROPER).
 
+g_alpha() ->
+    oneof([integer($a, $z),
+           integer($A, $Z)]).
 
+g_digit() ->
+    integer($0, $9).
+
+g_name() ->
+    non_empty(list(oneof([g_alpha(), g_digit()]))).
+
+g_filename() ->
+    ?LET({X, Y}, {g_name(), g_name()},
+         string:join([X, Y], ".")).
+
+g_safe() ->
+    elements("$-_@.&+-").
+
+g_extra() ->
+    elements("!*\"'(),'").
+
+g_hex() ->
+    ?LET(I, integer(0, 15),
+         case I of
+             K when K < 10 -> $0 + K;
+             10 -> $a;
+             11 -> $b;
+             12 -> $c;
+             13 -> $d;
+             14 -> $e;
+             15 -> $f
+         end).
+
+g_escape() ->
+    ?LET({X, Y}, {g_hex(), g_hex()},
+         [$%, X, Y]).
+
+g_xalpha() ->
+    oneof([g_escape(),
+           g_extra(),
+           g_safe(),
+           g_alpha(),
+           g_digit()]).
+
+g_segment() ->
+    list(xalpha).
+
+g_path() ->
+    ?LET(Components, list(g_segment()),
+         string:join(Components, "/")).
+
+g_nice_path() ->
+    ?LET({Cs, Fn}, {list(g_name()), g_filename()},
+         string:join(Cs, "/") ++ "/" ++ Fn).
+
+valid_component(C) ->
+    lists:all(fun allowed/1, C)
+        andalso (not lists:prefix(".", C))
+        andalso (not lists:suffix(".", C))
+        andalso (string:str(C, "..") == 0).
+
+valid_path(P) ->
+    Components = string:tokens(P, "/"),
+    lists:all(fun valid_component/1, Components).
+
+g_bad_path() ->
+    ?SUCHTHAT(P, g_path(),
+              not valid_path(P)).
+
+prop_ok_path() ->
+    ?FORALL(NP, g_nice_path(),
+            begin
+                {ok, NP} == sanitize(NP)
+            end).
+
+prop_bad_path() ->
+    ?FORALL(BP, g_bad_path(),
+            begin
+               case sanitize(BP) of
+                   {ok, _} -> false;
+                   {error, _Err} -> true
+               end
+           end).
+
+proper_test() ->
+    ?assertEqual([],
+                 proper:module(?MODULE, [{numtests, 300}])).
+
+-endif.
+-endif.
