@@ -1,5 +1,9 @@
 -module(etorrent_cowboy_handler).
 
+-ifdef(TEST).
+-include_lib("proper/include/proper.hrl").
+-include_lib("eunit/include/eunit.hrl").
+-endif.
 
 -export([init/3, handle/2, terminate/2]).
 
@@ -18,19 +22,22 @@ handle(Req, State) ->
         [<<"ajax">>, <<"etorrent_webui">>, <<"log">>] ->
             Entries = etorrent_query:log_list(),
             Rep = [format_log_entry(E) ||
-                      E <- lists:sort(fun(X, Y) ->
-                                              proplists:get_value(time, X)
-                                                  >= proplists:get_value(time, Y)
-                                      end,
-                                      Entries)],
-            {ok, RepReq} = cowboy_http_req:reply(200, [{'Content-Type', html_type()}],
-                                                 Rep, PathReq),
+                      E <- lists:sort(
+                             fun(X, Y) ->
+                                     proplists:get_value(time, X)
+                                         >= proplists:get_value(time, Y)
+                             end,
+                             Entries)],
+            {ok, RepReq} =
+                cowboy_http_req:reply(200, [{'Content-Type', html_type()}],
+                                      Rep, PathReq),
             {ok, RepReq, State};
         [<<"ajax">>, <<"etorrent_webui">>, <<"log_json">>] ->
             Entries = etorrent_query:log_list(),
             Rep = dwrap(Entries),
-            {ok, RepReq} = cowboy_http_req:reply(200, [{'Content-Type', html_type()}],
-                                                 Rep, PathReq),
+            {ok, RepReq} =
+                cowboy_http_req:reply(200, [{'Content-Type', html_type()}],
+                                      Rep, PathReq),
             {ok, RepReq, State};
         [<<"ajax">>, <<"etorrent_webui">>, <<"list">>] ->
             {ok, Rates} = list_rates(),
@@ -39,28 +46,37 @@ handle(Req, State) ->
                      Table,
                      table_footer(),
                      Rates],
-            {ok, RepReq} = cowboy_http_req:reply(200, [{'Content-Type', html_type()}],
-                                                 Reply, PathReq),
+            {ok, RepReq} = cowboy_http_req:reply(
+                             200, [{'Content-Type', html_type()}],
+                             Reply, PathReq),
             {ok, RepReq, State};
         [] ->
             handle_static_file(PathReq, State, ["index.html"]);
         OtherPath ->
-            handle_static_file(PathReq, State, [binary_to_list(X) || X <- OtherPath])
+            handle_static_file(PathReq,
+                               State,
+                               [binary_to_list(X) || X <- OtherPath])
     end.
 
 handle_static_file(Req, State, Path) ->
     Priv = code:priv_dir(etorrent),
-    F = filename:join([Priv, "webui", "htdocs" | Path]),
+    {ok, Sanitized} = sanitize(Path),
+    F = filename:join([Priv, "webui", "htdocs" | Sanitized]),
     case file:read_file(F) of
         {ok, B} ->
             MimeType = case mimetypes:filename(F) of
                            unknown -> <<"text/plain">>;
                            [Otherwise]  -> Otherwise
                        end,
-            {ok, RepReq} = cowboy_http_req:reply(200, [{'Content-Type', MimeType }], B, Req),
+            {ok, RepReq} = cowboy_http_req:reply(
+                             200,
+                             [{'Content-Type', MimeType }], B, Req),
             {ok, RepReq, State};
         {error, enoent} ->
-            {ok, RepReq} = cowboy_http_req:reply(404, [{'Content-Type', <<"text/plain">>}], <<"Not found">>, Req),
+            {ok, RepReq} = cowboy_http_req:reply(
+                             404,
+                             [{'Content-Type', <<"text/plain">>}],
+                             <<"Not found">>, Req),
             {ok, RepReq, State}
     end.
 
@@ -108,41 +124,41 @@ list_torrents() ->
 		SL = proplists:get_value(rate_sparkline, R),
                 {value, PL} = etorrent_table:get_torrent(Id),
 		Uploaded = proplists:get_value(uploaded, R) +
-		           proplists:get_value(all_time_uploaded, R),
+                           proplists:get_value(all_time_uploaded, R),
 		Downloaded = proplists:get_value(downloaded, R) +
-		             proplists:get_value(all_time_downloaded, R),
+                             proplists:get_value(all_time_downloaded, R),
 		io_lib:format(
-		  "<tr><td>~3.B</td><td>~s</td><td>~11.1f</td>" ++
-		  "<td>~11.1f</td><td>~11.1f / ~11.1f</td>"++
-		  "<td>~.3f</td>"++
-		  "<td>~3.B / ~3.B</td><td>~7.1f%</td>" ++
-		  "<td><span id=\"~s\">~s</span>~9.B / ~9.B / ~9.B</td>" ++
-		  "<td><span id=\"boxplot\">~s</td></tr>~n",
-		  [Id,
-		   strip_torrent(proplists:get_value(filename, PL)),
-		   proplists:get_value(total, R) / (1024 * 1024),
-		   proplists:get_value(left, R) / (1024 * 1024),
-		   Uploaded / (1024 * 1024),
-		   Downloaded / (1024 * 1024),
-		   ratio(Uploaded, Downloaded),
-		   proplists:get_value(leechers, R),
-		   proplists:get_value(seeders, R),
-		   percent_complete(R),
-		   case proplists:get_value(state, R) of
-		       seeding  -> "sparkline-seed";
-		       leeching -> "sparkline-leech";
-		       endgame  -> "sparkline-leech";
-		       unknown ->  "sparkline-leech"
-		   end,
-		   show_sparkline(lists:reverse(SL)),
-		   round(lists:max(SL) / 1024),
-		   case SL of
-		       %% []      -> 0;
-		       [F | _] -> round(F / 1024)
-		   end,
-		   round(lists:min(SL) / 1024),
-		   show_sparkline(lists:reverse(SL))])
-	    end || R <- A],
+                  "<tr><td>~3.B</td><td>~s</td><td>~11.1f</td>" ++
+                  "<td>~11.1f</td><td>~11.1f / ~11.1f</td>"++
+                  "<td>~.3f</td>"++
+                  "<td>~3.B / ~3.B</td><td>~7.1f%</td>" ++
+                  "<td><span id=\"~s\">~s</span>~9.B / ~9.B / ~9.B</td>" ++
+                  "<td><span id=\"boxplot\">~s</td></tr>~n",
+                  [Id,
+                   strip_torrent(proplists:get_value(filename, PL)),
+                   proplists:get_value(total, R) / (1024 * 1024),
+                   proplists:get_value(left, R) / (1024 * 1024),
+                   Uploaded / (1024 * 1024),
+                   Downloaded / (1024 * 1024),
+                   ratio(Uploaded, Downloaded),
+                   proplists:get_value(leechers, R),
+                   proplists:get_value(seeders, R),
+                   percent_complete(R),
+                   case proplists:get_value(state, R) of
+                       seeding  -> "sparkline-seed";
+                       leeching -> "sparkline-leech";
+                       endgame  -> "sparkline-leech";
+                       unknown ->  "sparkline-leech"
+                   end,
+                   show_sparkline(lists:reverse(SL)),
+                   round(lists:max(SL) / 1024),
+                   case SL of
+                       %% []      -> 0;
+                       [F | _] -> round(F / 1024)
+                   end,
+                   round(lists:min(SL) / 1024),
+                   show_sparkline(lists:reverse(SL))])
+            end || R <- A],
     {ok, Rows}.
 
 percent_complete(R) ->
@@ -167,3 +183,127 @@ show_sparkline([I | R]) ->
 conv_number(I) when is_integer(I) -> integer_to_list(I);
 conv_number(F) when is_float(F)   -> float_to_list(F).
 
+sanitize(Path) ->
+    case lists:all(fun allowed/1, Path) of
+        true ->
+            dot_check(Path);
+        false ->
+            {error, unallowed_characters}
+    end.
+
+dot_check(Path) ->
+    case dot_check1(Path) of
+        ok ->
+            {ok, Path};
+        fail ->
+            {error, dot_check}
+    end.
+
+dot_check1([$., $/ | _]) -> fail;
+dot_check1([$/, $/ | _]) -> fail;
+dot_check1([$/, $. | _]) -> fail;
+dot_check1([$., $. | _]) -> fail;
+dot_check1([_A, B | Next]) -> dot_check1([B | Next]);
+dot_check1(".") -> fail;
+dot_check1("/") -> fail;
+dot_check1(L) when is_list(L) -> ok.
+
+allowed(C) when C >= $a, C =< $z -> true;
+allowed(C) when C >= $A, C =< $Z -> true;
+allowed(C) when C >= $0, C =< $9 -> true;
+allowed(C) when C == $/;
+                C == $.          -> true;
+allowed(_C)                      -> false.
+
+-ifdef(EUNIT).
+-ifdef(PROPER).
+
+g_alpha() ->
+    oneof([integer($a, $z),
+           integer($A, $Z)]).
+
+g_digit() ->
+    integer($0, $9).
+
+g_name() ->
+    non_empty(list(oneof([g_alpha(), g_digit()]))).
+
+g_filename() ->
+    ?LET({X, Y}, {g_name(), g_name()},
+         string:join([X, Y], ".")).
+
+g_safe() ->
+    elements("$-_@.&+-").
+
+g_extra() ->
+    elements("!*\"'(),'").
+
+g_hex() ->
+    ?LET(I, integer(0, 15),
+         case I of
+             K when K < 10 -> $0 + K;
+             10 -> $a;
+             11 -> $b;
+             12 -> $c;
+             13 -> $d;
+             14 -> $e;
+             15 -> $f
+         end).
+
+g_escape() ->
+    ?LET({X, Y}, {g_hex(), g_hex()},
+         [$%, X, Y]).
+
+g_xalpha() ->
+    oneof([g_escape(),
+           g_extra(),
+           g_safe(),
+           g_alpha(),
+           g_digit()]).
+
+g_segment() ->
+    list(xalpha).
+
+g_path() ->
+    ?LET(Components, list(g_segment()),
+         string:join(Components, "/")).
+
+g_nice_path() ->
+    ?LET({Cs, Fn}, {list(g_name()), g_filename()},
+         string:join(Cs, "/") ++ "/" ++ Fn).
+
+valid_component(C) ->
+    lists:all(fun allowed/1, C)
+        andalso (not lists:prefix(".", C))
+        andalso (not lists:suffix(".", C))
+        andalso (string:str(C, "..") == 0).
+
+valid_path(P) ->
+    Components = string:tokens(P, "/"),
+    lists:all(fun valid_component/1, Components).
+
+g_bad_path() ->
+    ?SUCHTHAT(P, g_path(),
+              not valid_path(P)).
+
+prop_ok_path() ->
+    ?FORALL(NP, g_nice_path(),
+            begin
+                {ok, NP} == sanitize(NP)
+            end).
+
+prop_bad_path() ->
+    ?FORALL(BP, g_bad_path(),
+            begin
+               case sanitize(BP) of
+                   {ok, _} -> false;
+                   {error, _Err} -> true
+               end
+           end).
+
+proper_test() ->
+    ?assertEqual([],
+                 proper:module(?MODULE, [{numtests, 300}])).
+
+-endif.
+-endif.
