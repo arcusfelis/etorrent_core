@@ -28,6 +28,11 @@
          get_mode/1, %% for debugging
          set_peer_id/2]).
 
+%% Relocation API
+%-export([set_directory/2,
+%         pause_relocation/1,
+%         start_relocation/1]).
+
 %% gproc registry entries
 -export([register_server/1,
          lookup_server/1,

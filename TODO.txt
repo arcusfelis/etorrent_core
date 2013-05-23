@@ -1,0 +1,4 @@
+Online file moving.
+- etorrent_torrent_ctl:set_directory/2
+- etorrent_torrent_ctl:pause_relocation/1
+- etorrent_torrent_ctl:start_relocation/1
