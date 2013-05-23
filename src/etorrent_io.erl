@@ -88,17 +88,18 @@
 -type piece_index() :: etorrent_types:piece_index().
 -type file_path() :: etorrent_types:file_path().
 -type torrent_id() :: etorrent_types:torrent_id().
--type block_pos() :: {string(), block_offset(), block_len()}.
+-type file_id() :: file_id().
+-type block_pos() :: {file_id(), block_offset(), block_len()}.
 
 -record(io_file, {
     rel_path :: file_path(),
     process  :: pid(),
     monitor  :: reference(),
-    accessed :: {integer(), integer(), integer()}}).
+    accessed :: erlang:timestamp()}).
 
 -record(state, {
     torrent :: torrent_id(),
-    pieces  :: array(),
+    pieces  :: array(), %% piece() => [block_pos()]
     file_list :: [{string(), pos_integer()}],
     files_open :: list(#io_file{}),
     files_max  :: pos_integer()}).
@@ -123,7 +124,7 @@ allocate(TorrentID) ->
 	      case ISz - Sz of
 		  0 -> ok;
 		  N when is_integer(N), N > 0 ->
-		      allocate(TorrentID, Pth, N)
+		      allocate_file(TorrentID, Pth, N)
 	      end
       end,
       Files),
@@ -131,10 +132,10 @@ allocate(TorrentID) ->
 
 %% @doc Allocate bytes in the end of a file
 %% @end
--spec allocate(torrent_id(), string(), integer()) -> ok.
-allocate(TorrentId, FilePath, BytesToWrite) ->
-    ok = schedule_io_operation(TorrentId, FilePath),
-    FilePid = await_open_file(TorrentId, FilePath),
+-spec allocate_file(torrent_id(), file_id(), integer()) -> ok.
+allocate_file(TorrentId, FileId, BytesToWrite) ->
+    ok = schedule_io_operation(TorrentId, FileId),
+    FilePid = await_open_file(TorrentId, FileId),
     ok = etorrent_io_file:allocate(FilePid, BytesToWrite).
 
 piece_sizes(Torrent) ->
