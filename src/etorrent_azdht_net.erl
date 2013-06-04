@@ -4,7 +4,6 @@
 -module(etorrent_azdht_net).
 
 -ifdef(TEST).
--include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
@@ -37,11 +36,12 @@
 %     the infohash.
 
 % Public interface
--export([start_link/1,
+-export([start_link/2,
          node_port/0,
          contact/3,
          ping/1,
          find_node/2,
+         find_value/2,
          find_node_search/1,
          find_node_search/2,
          get_peers/2,
@@ -180,6 +180,16 @@
     network_coordinates :: position()
 }).
 
+-record(find_value_request, {
+    %% ID (key) to search.
+    %% Key for which the values are requested.
+    id :: binary(),
+    %% Flags for the operation.
+    flags = 0 :: byte(), 
+    %% Maximum number of returned values. 
+    max_values = 16 :: byte()
+}).
+
 % gen_server callbacks
 -export([init/1,
          handle_call/3,
@@ -207,7 +217,7 @@
 % Contancts and settings
 %
 srv_name() ->
-   dht_socket_server.
+   azdht_socket_server.
 
 query_timeout() ->
     2000.
@@ -226,8 +236,8 @@ socket_options() ->
 %
 % Public interface
 %
-start_link(DHTPort) ->
-    gen_server:start_link({local, srv_name()}, ?MODULE, [DHTPort], []).
+start_link(DHTPort, ExternalIP) ->
+    gen_server:start_link({local, srv_name()}, ?MODULE, [DHTPort, ExternalIP], []).
 
 
 -spec node_port() -> portnum().
@@ -258,10 +268,18 @@ find_node(Contact, Target)  ->
         timeout ->
             {error, timeout};
         Values  ->
-            {ID, Nodes} = decode_reply_body(find_node, Values),
+            decode_reply_body(find_node, Values)
             % TODO
 %           etorrent_dht_state:log_request_success(ID, IP, Port),
-            {ID, Nodes}
+    end.
+
+
+find_value(Contact, Target) ->
+    case gen_server:call(srv_name(), {find_value, Contact, Target}) of
+        timeout ->
+            {error, timeout};
+        Values  ->
+            decode_reply_body(find_value, Values)
     end.
 
 %
@@ -457,11 +475,11 @@ announce(Contact, InfoHash, Token, BTPort) ->
 
 %% ==================================================================
 
-init([DHTPort]) ->
+init([DHTPort, ExternalIP]) ->
     {ok, Socket} = gen_udp:open(DHTPort, socket_options()),
     State = #state{socket=Socket,
                    sent=gb_trees:empty(),
-                   node_address={{0,0,0,0}, DHTPort},
+                   node_address={ExternalIP, DHTPort},
                    next_transaction_id=new_transaction_id(),
                    instance_id=new_instance_id()},
     {ok, State}.
@@ -474,6 +492,11 @@ handle_call({ping, Contact}, From, State) ->
 handle_call({find_node, Contact, Target}, From, State) ->
     Action = find_node,
     Args = #find_node_request{id=Target},
+    do_send_query(Action, Args, Contact, From, State);
+
+handle_call({find_value, Contact, Key}, From, State) ->
+    Action = find_value,
+    Args = #find_value_request{id=Key},
     do_send_query(Action, Args, Contact, From, State);
 
 handle_call({get_peers, Contact, InfoHash}, From, State) ->
@@ -795,8 +818,11 @@ encode_request_body(find_node, Version, #find_node_request{
      [[encode_int(NodeStatus), encode_int(DhtSize)]
      || higher_or_equal_version(Version, more_node_status)]
     ];
-encode_request_body(find_value, Version, Key) ->
-    [Key, encode_byte(0), encode_byte(16)];
+encode_request_body(find_value, Version, #find_value_request{
+                id=ID,
+                flags=Flags,
+                max_values=MaxValues}) ->
+    [encode_sized_binary(ID), encode_byte(Flags), encode_byte(MaxValues)];
 encode_request_body(ping, Version, _) ->
     [].
 
@@ -863,7 +889,7 @@ decode_reply_body(find_node, Version, Bin) ->
         },
     {Reply, Bin5};
 decode_reply_body(find_value, Version, Bin) ->
-    ok;
+    {ok, Bin};
 decode_reply_body(ping, Version, Bin) ->
     {NetworkCoordinates, Bin1} =
     case higher_or_equal_version(Version, vivaldi) of
@@ -1001,7 +1027,7 @@ proto_version_num(VersionName) ->
     restrict_id_ports2z  -> 36;
     restrict_id3         -> 50;
     minimum_acceptable   -> 16;
-    supported            -> 26
+    supported            -> 50
     end.
 
 
@@ -1068,7 +1094,7 @@ decode_find_node_reply_v50_test() ->
     Encoded = 
 <<0,0,4,5,0,23,91,158,133,10,54,16,79,15,21,209,26,0,0,0,0,0,163,63,81,111,0,0,
   0,0,0,0,0,0,0,15,89,82,
-  %% Vivaldi
+  %% Vivaldi (Count=1, Type=1, Size=16)
   1,1,16,66,172,48,247,193,222,165,78,66,138,147,38,64,117,5,250,
   0,20,1,50,4,136,169,240,183,187,38,1,50,4,178,126,109,151,50,87,1,
   51,4,180,194,225,103,44,246,1,51,4,212,187,99,32,240,105,1,51,4,71,203,192,
@@ -1087,6 +1113,32 @@ decode_ping_reply_v50_test() ->
   0,0,0,1,4,2,93,75,156,26,10>>,
     {ReplyHeader, EncodedBody} = decode_reply_header(Encoded),
     decode_reply_body(ping, 50, EncodedBody).
+
+decode_find_value_reply_v50_test() ->
+    Encoded = 
+<<0,0,4,7,0,10,59,231,236,78,46,77,80,232,184,143,50,0,0,0,0,0,202,9,186,151,0,
+  0,0,20,1,51,4,176,205,120,124,102,46,1,50,4,86,183,19,22,237,207,1,51,4,109,
+  11,140,246,234,96,1,51,4,24,72,68,22,215,46,1,50,4,178,47,116,49,197,24,1,51,
+  4,109,65,167,187,253,198,1,51,4,78,226,84,17,172,217,1,51,4,123,194,241,201,
+  59,6,1,51,4,90,210,133,94,158,139,1,51,4,89,141,28,134,227,11,1,50,4,95,28,
+  215,202,81,50,1,50,4,108,16,231,161,203,207,1,51,4,112,209,137,10,174,101,1,
+  51,4,101,162,163,22,69,26,1,50,4,72,9,31,224,26,225,1,51,4,81,57,81,147,121,
+  152,1,50,4,89,235,246,223,231,230,1,51,4,80,230,5,103,73,111,1,51,4,123,243,
+  133,26,100,215,1,50,4,178,185,42,250,248,88,1,1,16,65,227,179,146,66,151,181,
+  220,66,129,151,217,62,99,194,145>>,
+    {ReplyHeader, EncodedBody} = decode_reply_header(Encoded),
+    ReplyBody = decode_reply_body(find_value, 50, EncodedBody),
+    io:format(user, "ReplyBody ~p~n", [ReplyBody]),
+    ok.
+
+decode_error_reply_v50_test() ->
+    Encoded = <<0,0,4,8,0,130,225,204,154,253,215,52,255,72,14,158,50,0,0,0,
+                0,0,202,9,186,151,0,0,0,1,4,2,93,190,244,27,88>>,
+    {ReplyHeader, EncodedBody} = decode_reply_header(Encoded),
+    ReplyBody = decode_reply_body(error, 50, EncodedBody),
+    io:format(user, "ReplyBody ~p~n", [ReplyBody]),
+    ok.
+
 
 decode_network_coordinates_test_() ->
     [?_assertEqual(decode_network_coordinates(<<0,0,0,1,4,2,93,75,156,26,10>>),
