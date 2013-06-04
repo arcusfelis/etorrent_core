@@ -44,6 +44,7 @@
 
 -type torrentid() :: etorrent_types:torrent_id().
 -type pieceindex() :: etorrent_types:piece_index().
+-type ipaddr() :: etorrent_types:ipaddr().
 -type pieceset() :: etorrent_pieceset:t().
 -type peerstate() :: etorrent_peerstate:peerstate().
 -type peerconf() :: etorrent_peerconf:peerconf().
@@ -63,7 +64,10 @@
     config = exit(required) :: peerconf(),
 
     extensions :: term(),
-    reject_after_choke_tref
+    reject_after_choke_tref :: term(),
+    %% Does remote peer support DHT?
+    remote_dht :: boolean(),
+    remote_ip :: ipaddr()
     }).
 
 %% Default size for a chunk. All clients use this.
@@ -201,6 +205,9 @@ init([TrackerUrl, LocalPeerID, RemotePeerID,
 
     Extended = proplists:get_bool(extended_messaging, Caps),
     Fast     = proplists:get_bool(fast_extension, Caps),
+    %% Does remote peer support DHT?
+    DHT      = proplists:get_bool(dht_support, Caps),
+    [lager:info("Remote peer supports DHT.") || DHT],
     Config0  = etorrent_peerconf:new(),
     Config1  = etorrent_peerconf:localid(LocalPeerID, Config0),
     Config2  = etorrent_peerconf:remoteid(RemotePeerID, Config1),
@@ -223,7 +230,9 @@ init([TrackerUrl, LocalPeerID, RemotePeerID,
         remote=Remote,
         local=Local,
         config=Config,
-        extensions=Exts},
+        extensions=Exts,
+        remote_dht=DHT,
+        remote_ip=IP},
     {ok, State}.
 
 %% @private
@@ -621,6 +630,9 @@ handle_message({have, Piece}, State) ->
     TmpLocal  = check_local_interest(Piece, Local, SendPid),
     NewRemote = check_remote_seeder(TmpRemote, TmpLocal),
     NewLocal  = poll_local_rqueue(Download, SendPid, NewRemote, TmpLocal),
+    Changed   = etorrent_peerstate:seeder(Remote) =/=
+                etorrent_peerstate:seeder(NewRemote),
+    Changed andalso etorrent_table:statechange_peer(self(), seeder),
     NewState  = State#state{remote=NewRemote, local=NewLocal},
     {ok, NewState};
 
@@ -633,7 +645,6 @@ handle_message(have_none, State) ->
     NewState  = State#state{remote=NewRemote},
     {ok, NewState};
 
-%%IsSeeder andalso etorrent_table:statechange_peer(self(), seeder),
 handle_message(have_all, State) ->
     #state{torrent_id=TorrentID, send_pid=SendPid, download=Download, remote=Remote, local=Local, config=Config} = State,
     etorrent_peerconf:fast(Config) orelse erlang:error(badarg),
@@ -684,6 +695,10 @@ handle_message({extended, 0, Data}, State) ->
     lager:debug("Getting a supported extension list from the peer.", []),
     etorrent_peerconf:extended(Config) orelse erlang:error(badarg),
     {ok, Msg} = etorrent_bcoding:decode(Data),
+    lager:debug("Extended handshake dict: ~p", [Msg]),
+    ClientVersion = proplists:get_value(<<"v">>, Msg),
+    [etorrent_table:statechange_peer(self(), {version, ClientVersion})
+     || is_binary(ClientVersion)],
     Exts2 = etorrent_ext:handle_handshake_respond(Msg, Exts),
     {ok, State#state{extensions=Exts2}};
 
@@ -691,6 +706,13 @@ handle_message({extended, ExtId, Data}, State) ->
     #state{extensions=Exts} = State,
     {ok, Msg} = etorrent_ext:decode_msg(ExtId, Data, Exts),
     handle_ext_message(Msg, State);
+
+handle_message({port, PortNum}, State=#state{remote_dht=true,
+                                             remote_ip=RemoteIP}) ->
+    lager:info("Remote DHT-port is ~p.", [PortNum]),
+    LocalDHT = etorrent_config:dht(),
+    [etorrent_dht_state:safe_insert_node(RemoteIP, PortNum) || LocalDHT],
+    {ok, State};
 
 handle_message(Unknown, State) ->
     lager:error("Unknown handle_message: ~p", [Unknown]),
@@ -719,14 +741,15 @@ connection_initialize(incoming, State) ->
         local=Local,
         config=Config,
         extensions=Exts,
-        metadata_size=MetadataSize} = State,
+        metadata_size=MetadataSize,
+        remote_dht=RemoteDHT} = State,
     Extended = etorrent_peerconf:extended(Config),
     LocalID = etorrent_peerconf:localid(Config),
     Valid = etorrent_peerstate:pieces(Local),
     case etorrent_proto_wire:complete_handshake(Socket, Infohash, LocalID) of
         ok ->
-            SendPid = complete_connection_setup(Socket, Extended, 
-                                                Valid, Exts, MetadataSize),
+            SendPid = complete_connection_setup(Socket, Extended, Valid,
+                                                Exts, MetadataSize, RemoteDHT),
             NewState = State#state{send_pid=SendPid},
             {ok, NewState};
         {error, stop} ->
@@ -739,11 +762,12 @@ connection_initialize(outgoing, State) ->
         local=Local,
         config=Config,
         extensions=Exts,
-        metadata_size=MetadataSize} = State,
+        metadata_size=MetadataSize,
+        remote_dht=RemoteDHT} = State,
     Extended = etorrent_peerconf:extended(Config),
     Valid = etorrent_peerstate:pieces(Local),
-    SendPid = complete_connection_setup(Socket, Extended,
-                                        Valid, Exts, MetadataSize),
+    SendPid = complete_connection_setup(Socket, Extended, Valid, Exts,
+                                        MetadataSize, RemoteDHT),
     NewState = State#state{send_pid=SendPid},
     {ok, NewState}.
 
@@ -753,8 +777,12 @@ connection_initialize(outgoing, State) ->
 %%    * Start the send pid
 %%    * Send off the bitfield
 %%--------------------------------------------------------------------
-complete_connection_setup(Socket, Extended, Valid, Exts, MetadataSize) ->
+complete_connection_setup(Socket, Extended, Valid, Exts, MetadataSize,
+                          RemoteDHT) ->
     SendPid = etorrent_peer_send:await_server(Socket),
+    LocalDHT = etorrent_config:dht(),
+    [etorrent_peer_send:port(SendPid, etorrent_config:dht_port())
+     || RemoteDHT, LocalDHT],
     Bitfield = etorrent_pieceset:to_binary(Valid),
     Extra = add_metadata_size(Exts, MetadataSize),
     Extended andalso etorrent_peer_send:
