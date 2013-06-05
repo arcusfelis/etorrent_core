@@ -557,7 +557,7 @@ handle_info({timeout, _, IP, Port, ID}, State) ->
     NewState = case find_sent_query(IP, Port, ID, Sent) of
         error ->
             State;
-        {ok, {Client, _Timeout}} ->
+        {ok, {Client, _Timeout, Action}} ->
             _ = gen_server:reply(Client, timeout),
             NewSent = clear_sent_query(IP, Port, ID, Sent),
             State#state{sent=NewSent}
@@ -591,9 +591,9 @@ handle_info({udp, _Socket, IP, Port, Packet}, State) ->
             case find_sent_query(IP, Port, ConnId, Sent) of
                 error ->
                     State;
-                {ok, {Client, Timeout}} ->
+                {ok, {Client, Timeout, Action}} ->
                     _ = cancel_timeout(Timeout),
-                    _ = gen_server:reply(Client, {Version, Body}),
+                    _ = gen_server:reply(Client, {Action, Version, Body}),
                     NewSent = clear_sent_query(IP, Port, ConnId, Sent),
                     State#state{sent=NewSent}
             end
@@ -658,7 +658,7 @@ do_send_query(Action, Args, {Version, {IP, Port}}, From, State) ->
             TRef = timeout_reference(IP, Port, ConnId),
 %           lager:info("Sent ~w to ~w:~w", [Action, IP, Port]),
 
-            NewSent = store_sent_query(IP, Port, ConnId, From, TRef, Sent),
+            NewSent = store_sent_query(IP, Port, ConnId, From, TRef, Action, Sent),
             NewState = State#state{
                     sent=NewSent,
                     next_transaction_id=next_transaction_id(TranId)},
@@ -681,9 +681,9 @@ unique_connection_id(IP, Port, Open) ->
        true    -> ConnId
     end.
 
-store_sent_query(IP, Port, ID, Client, Timeout, Open) ->
+store_sent_query(IP, Port, ID, Client, Timeout, Action, Open) ->
     K = tkey(IP, Port, ID),
-    V = tval(Client, Timeout),
+    V = tval(Client, Timeout, Action),
     gb_trees:insert(K, V, Open).
 
 find_sent_query(IP, Port, ID, Open) ->
@@ -698,8 +698,8 @@ clear_sent_query(IP, Port, ID, Open) ->
 tkey(IP, Port, ID) ->
    {IP, Port, ID}.
 
-tval(Client, TimeoutRef) ->
-    {Client, TimeoutRef}.
+tval(Client, TimeoutRef, Action) ->
+    {Client, TimeoutRef, Action}.
 
 timeout_reference(IP, Port, ID) ->
     Msg = {timeout, self(), IP, Port, ID},
@@ -929,7 +929,9 @@ decode_request_body(find_node, Version, Bin) ->
 decode_request_body(Action, Version, Bin) ->
     {unknown, Bin}.
 
-decode_reply_body(Action, {Version, Bin}) ->
+decode_reply_body(ExpectedAction, {ReceivedAction, Version, Bin}) ->
+    {error, {ExpectedAction, ReceivedAction}};
+decode_reply_body(Action, {Action, Version, Bin}) ->
     decode_reply_body(Action, Version, Bin).
 
 decode_reply_body(find_node, Version, Bin) ->
@@ -1135,7 +1137,7 @@ proto_version_num(VersionName) ->
     restrict_id_ports2z  -> 36;
     restrict_id3         -> 50;
     minimum_acceptable   -> 16;
-    supported            -> 50
+    supported            -> 51
     end.
 
 
