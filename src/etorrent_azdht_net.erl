@@ -88,6 +88,7 @@
 }).
 
 -type position() :: #position{}.
+-type diversification_type() :: none | frequency | size.
 
 
 -record(request_header, {
@@ -190,6 +191,38 @@
     max_values = 16 :: byte()
 }).
 
+-record(find_value_reply, {
+    %% Indicates whether there is at least one other packet with values.
+    %% protocol version ≥DIV_AND_CONT
+    has_continuation :: boolean(), 
+    %% Indicates whether this packet carries values or contacts.
+    has_values  :: boolean(),
+    %% Number of stored contacts.
+    %% has_values == false
+    contacts_count :: short(),
+    %% Stored contacts that are close to the searched key.
+    %% has_values == false
+    contacts :: contacts(),
+    %% Network coordinates of the replying node.
+    %% HAS_VALUES == false && protocol version ≥VIVALDI_FINDVALUE
+    network_coordinates ::  network_coordinates(),
+    %% Type of key's diversification.
+    %% HAS_VALUES == true && protocol version ≥DIV_AND_CONT
+    diversification_type :: diversification_type(),
+    %% Values that match searched key.
+    %% HAS_VALUES == true
+    values % value_group() 
+}).
+
+-record(transport_value, {
+    created :: long(),
+    value :: binary(),
+    originator :: contacts(),
+    flags :: byte(),
+    life_hours :: byte() | undefined,
+    replication_control :: byte() | undefined
+}).
+
 % gen_server callbacks
 -export([init/1,
          handle_call/3,
@@ -214,7 +247,7 @@
 
 
 %
-% Contancts and settings
+% Contacts and settings
 %
 srv_name() ->
    azdht_socket_server.
@@ -684,7 +717,7 @@ decode_short(<<H:16/big-integer, T/binary>>) -> {H, T}.
 decode_int(<<H:32/big-integer, T/binary>>) -> {H, T}.
 decode_long(<<H:64/big-integer, T/binary>>) -> {H, T}.
 decode_connection_id(<<1:1, H:63/big-integer, T/binary>>) -> {H, T}.
-decode_none(Bin) -> {Bin, undefined}.
+decode_none(Bin) -> {undefined, Bin}.
 decode_float(<<H:32/big-float, T/binary>>) -> {H, T}.
 %% transport/udp/impl/DHTUDPUtils.java:    deserialiseVivaldi
 decode_network_coordinates(<<EntriesCount, Bin/binary>>) ->
@@ -741,6 +774,47 @@ decode_contacts_n(Bin, Left, Acc) ->
     {Contact, Bin1} = decode_contact(Bin),
     decode_contacts_n(Bin1, Left-1, [Contact|Acc]).
 
+
+%% transport/udp/impl/DHTUDPUtils.deserialiseTransportValues
+decode_value_group(Bin, Version) ->
+    {ValueCount, Bin1} = decode_value(Bin, Version),
+    decode_values_n(Bin1, Version, ValueCount, []).
+
+decode_values_n(Bin, _Version, 0, Acc) ->
+    {lists:reverse(Acc), Bin};
+decode_values_n(Bin, Version, Left, Acc) ->
+    {Value, Bin1} = decode_value(Version, Bin),
+    decode_values_n(Bin1, Version, Left-1, [Value|Acc]).
+
+decode_value(PacketVersion, Bin) ->
+    {Version, Bin1} =
+    case higher_or_equal_version(PacketVersion, remove_dist_add_ver) of
+        true  -> decode_int(Bin);
+        false -> decode_none(Bin)
+    end,
+    %% final long  created     = is.readLong() + skew;
+    {Created, Bin2} = decode_long(Bin1),
+    {Value, Bin3} = decode_sized_binary(Bin2),
+    {Originator, Bin4} = decode_contact(Bin3),
+    {Flags, Bin5} = decode_byte(Bin4),
+    {LifeHours, Bin6} =
+    case higher_or_equal_version(PacketVersion, longer_life) of
+        true  -> decode_byte(Bin5);
+        false -> decode_none(Bin5)
+    end,
+    {RepControl, Bin7} =
+    case higher_or_equal_version(PacketVersion, replication_control) of
+        true  -> decode_byte(Bin6);
+        false -> decode_none(Bin6)
+    end,
+    ValueRec = #transport_value{
+        created = Created,
+        value = Value,
+        originator = Originator,
+        flags = Flags,
+        life_hours = LifeHours,
+        replication_control = RepControl},
+    {ValueRec, Bin7}.
 
 
 encode_byte(X)  when is_integer(X) -> <<X>>.
@@ -879,17 +953,51 @@ decode_reply_body(find_node, Version, Bin) ->
         true -> decode_network_coordinates(Bin3);
         false -> decode_none(Bin3)
     end,
-    {Contancts, Bin5} = decode_contacts(Bin4),
+    {Contacts, Bin5} = decode_contacts(Bin4),
     Reply = #find_node_reply{
         spoof_id=SpoofId,
         node_type=NodeType,
         dht_size=DhtSize,
         network_coordinates=NetworkCoordinates,
-        contacts=Contancts
+        contacts=Contacts
         },
     {Reply, Bin5};
 decode_reply_body(find_value, Version, Bin) ->
-    {ok, Bin};
+    {HasContinuation, Bin1} =
+    case higher_or_equal_version(Version, div_and_cont) of
+        true -> decode_boolean(Bin);
+        flase -> {false, Bin}
+    end,
+    {HasValues, Bin2} = decode_boolean(Bin1),
+    case HasValues of
+        true ->
+            %% Decode values.
+            {DivType, BinV1} =
+            case higher_or_equal_version(Version, div_and_cont) of
+                 true -> diversification_type(decode_byte(Bin2));
+                 false -> {none, Bin2}
+            end,
+            {Values, _} = decode_value_group(BinV1, Version),
+            Reply = #find_value_reply{
+                has_continuation=HasContinuation,
+                has_values=HasValues,
+                diversification_type=DivType,
+                values=Values},
+            {Reply, BinV1};
+        false ->
+            {Contacts, BinC1} = decode_contacts(Bin2),
+            {NetworkCoordinates, BinC2} =
+            case higher_or_equal_version(Version, vivaldi) of
+                true -> decode_network_coordinates(BinC1);
+                false -> decode_none(BinC1)
+            end,
+            Reply = #find_value_reply{
+                has_continuation=HasContinuation,
+                has_values=HasValues,
+                contacts=Contacts,
+                network_coordinates=NetworkCoordinates},
+            {Reply, BinC2}
+    end;
 decode_reply_body(ping, Version, Bin) ->
     {NetworkCoordinates, Bin1} =
     case higher_or_equal_version(Version, vivaldi) of
@@ -1057,6 +1165,10 @@ action_name(ActionNum) when is_integer(ActionNum) ->
         1031 -> find_value;
         _    -> undefined
     end.
+
+diversification_type(1) -> none;
+diversification_type(2) -> frequency;
+diversification_type(3) -> size.
 
 milliseconds_since_epoch() ->
     {MegaSeconds, Seconds, MicroSeconds} = os:timestamp(),
