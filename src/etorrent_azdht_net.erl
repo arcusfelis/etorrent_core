@@ -929,10 +929,18 @@ decode_request_body(find_node, Version, Bin) ->
 decode_request_body(Action, Version, Bin) ->
     {unknown, Bin}.
 
-decode_reply_body(ExpectedAction, {ReceivedAction, Version, Bin}) ->
-    {error, {ExpectedAction, ReceivedAction}};
 decode_reply_body(Action, {Action, Version, Bin}) ->
-    decode_reply_body(Action, Version, Bin).
+    try decode_reply_body(Action, Version, Bin) of
+        {Rec, _Bin} -> {ok, Rec}
+        catch error:Reason ->
+            Trace = erlang:get_stacktrace(),
+            lager:error("Decoding error ~p.~nTrace: ~s.",
+                        [Reason, format_trace(Trace)]),
+            {error, Reason}
+    end;
+
+decode_reply_body(ExpectedAction, {ReceivedAction, _Version, _Bin}) ->
+    {error, {action_mismatch, ExpectedAction, ReceivedAction}}.
 
 decode_reply_body(find_node, Version, Bin) ->
     {SpoofId, Bin1} =
@@ -950,6 +958,7 @@ decode_reply_body(find_node, Version, Bin) ->
         true -> decode_int(Bin2);
         false -> decode_none(Bin2)
     end,
+    %% TODO: Decode byte() here in v51.
     {NetworkCoordinates, Bin4} =
     case higher_or_equal_version(Version, vivaldi) of
         true -> decode_network_coordinates(Bin3);
@@ -1137,7 +1146,7 @@ proto_version_num(VersionName) ->
     restrict_id_ports2z  -> 36;
     restrict_id3         -> 50;
     minimum_acceptable   -> 16;
-    supported            -> 51
+    supported            -> 50
     end.
 
 
@@ -1245,6 +1254,25 @@ decode_find_value_reply_v50_test() ->
     io:format(user, "ReplyBody ~p~n", [ReplyBody]),
     ok.
 
+decode_find_node_reply_v51_test() ->
+    Encoded = 
+<<0,0,4,5,0,120,226,75,200,246,233,208,221,127,170,110,51,0,0,0,0,0,163,63,81,
+  111,0,0,0,0,0,0,0,0,0,0,12,61,183,1,1,16,193,221,144,79,65,150,127,122,63,
+  105,164,39,62,205,235,26,0,20,1,51,4,118,101,47,145,213,84,1,51,4,190,106,
+  222,2,94,199,1,51,4,78,150,53,246,185,235,1,51,4,41,158,60,202,191,95,1,50,4,
+  83,220,95,207,119,158,1,51,4,2,97,248,123,139,219,1,50,4,83,246,159,11,113,
+  236,1,51,4,212,187,99,32,240,105,1,51,4,58,164,96,46,61,198,1,50,4,213,87,
+  241,72,27,218,1,51,4,171,97,180,43,132,48,1,50,4,2,135,7,205,134,76,1,50,4,
+  176,110,235,193,184,16,1,51,4,94,1,16,218,132,159,1,50,4,95,56,157,238,51,
+  119,1,50,4,92,115,205,224,220,103,1,51,4,108,84,170,113,232,78,1,51,4,78,12,
+  77,131,192,1,1,51,4,66,68,151,141,145,67,1,50,4,109,191,7,149,130,76>>,
+    {ReplyHeader, EncodedBody} = decode_reply_header(Encoded),
+    io:format(user, "ReplyHeader ~p~n", [ReplyHeader]),
+    ReplyBody = decode_reply_body(find_node, 51, EncodedBody),
+    io:format(user, "ReplyBody ~p~n", [ReplyBody]),
+    ok.
+
+
 decode_error_reply_v50_test() ->
     Encoded = <<0,0,4,8,0,130,225,204,154,253,215,52,255,72,14,158,50,0,0,0,
                 0,0,202,9,186,151,0,0,0,1,4,2,93,190,244,27,88>>,
@@ -1297,3 +1325,25 @@ record_definition_list() ->
     ,?REC_DEF(request_header)
     ,?REC_DEF(reply_header)
     ].
+
+format_trace([{M,F,A,PL}|T]) ->
+    Line = proplists:get_value(line, PL),
+    Str = case Line of
+        undefined -> io_lib:format("~p:~p~s~n", [M,F,format_arity(A)]);
+        _         -> io_lib:format("~p#~p:~p~s~n", [M,Line,F,format_arity(A)])
+    end,
+    [Str|format_trace(T)];
+format_trace([]) ->
+    [].
+
+format_arity(A) when is_integer(A) ->
+    io_lib:format("/~p", [A]);
+format_arity([]) ->
+    "()";
+format_arity([H|T]) ->
+    [io_lib:format("(~p", [H]),
+     [io_lib:format(",~p", [X]) || X <- T],
+     ")"];
+format_arity(_) ->
+    io_lib:format("", []).
+
