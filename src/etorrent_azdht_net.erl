@@ -38,16 +38,20 @@
 % Public interface
 -export([start_link/2,
          node_port/0,
-         contact/3,
          ping/1,
          find_node/2,
          find_value/2,
-         find_node_search/1,
-         find_node_search/2,
          get_peers/2,
-         get_peers_search/1,
-         get_peers_search/2,
          announce/4]).
+
+-import(etorrent_azdht, [
+         higher_or_equal_version/2,
+         lower_version/2,
+         proto_version_num/1,
+         action_name/1,
+         action_request_num/1,
+         diversification_type/1
+        ]).
 
 
 -define(LONG_MSB, (1 bsl 63)).
@@ -56,172 +60,7 @@
 -define(MAX_TRANSACTION_ID, 16#FFFFFF).
 -define(MAX_UINT, 16#FFFFFFFF).
 
--type nodeinfo() :: etorrent_types:nodeinfo().
--type peerinfo() :: etorrent_types:peerinfo().
--type trackerinfo() :: etorrent_types:trackerinfo().
--type infohash() :: etorrent_types:infohash().
--type token() :: etorrent_types:token().
--type dht_qtype() :: etorrent_types:dht_qtype().
--type ipaddr() :: etorrent_types:ipaddr().
--type nodeid() :: etorrent_types:nodeid().
--type portnum() :: etorrent_types:portnum().
--type transaction() :: etorrent_types:transaction().
-
--type long()  :: non_neg_integer().
--type int()   :: non_neg_integer().
--type short() :: non_neg_integer().
-%% -type byte() :: 0 .. 255.
--type address() :: {ipaddr(), portnum()}.
--type network_coordinates() :: term().
--type transaction_id() :: non_neg_integer().
--type instance_id() :: non_neg_integer().
--type contact() :: term().
--type contacts() :: [contact()].
--type position_version() :: atom().
-
--record(position, {
-    x = 0 :: float(),
-    y = 0 :: float(),
-    z = 0 :: float(),
-    error = 0 :: float(),
-    type :: position_version()
-}).
-
--type position() :: #position{}.
--type diversification_type() :: none | frequency | size.
-
-
--record(request_header, {
-    %% Random number with most significant bit set to 1.
-    connection_id :: long(),
-    %% Type of the packet.
-    action :: int(),
-    %% Unique number used through the communication;
-    %% it is randomly generated at the start of the application and
-    %% increased by 1 with each sent packet.
-    transaction_id :: int(),
-    %% version of protocol used in this packet.
-    protocol_version :: byte(),
-    %% ID of the DHT implementator; 0 = Azureus, 1 = ShareNet, 255 = unknown
-    %% ≥VENDOR_ID
-    vendor_id = 0 :: byte(),
-    %% ID of the network; 0 = stable version; 1 = CVS version
-    %% ≥NETWORKS
-    network_id = 0 :: int(),
-    %% Maximum protocol version this node supports;
-    %% if this packet's protocol version is <FIX_ORIGINATOR
-    %% then the value is stored at the end of the packet
-    %% ≥FIX_ORIGINATOR
-    local_protocol_version :: byte(),
-    %% Address of the local node
-    node_address :: address(),
-    %% Application's helper number; randomly generated at the start
-    instance_id :: int(),     
-    %% Time of the local node;
-    %% stored as number of milliseconds since Epoch.
-    time :: long()
-}).
-
--record(reply_header, {
-    %% Type of the packet.
-    action :: int(),
-    %% Must be equal to TRANSACTION_ID from the request.
-    transaction_id :: int(),     
-    %% must be equal to CONNECTION_ID from the request.
-    connection_id :: long(),
-    %% Version of protocol used in this packet.
-    protocol_version :: byte(),
-    %% Same meaning as in the request.
-    %% ≥VENDOR_ID
-    vendor_id = 0 :: byte(),
-    %% Same meaning as in the request.
-    %% ≥NETWORKS
-    network_id = 0 :: int(),
-    %% Instance id of the node that replies to the request.
-    instance_id :: int()
-}).
-
--record(find_node_request, {
-    %% ID to search
-    id :: binary(),
-    %% Node status.
-    %% ≥MORE_NODE_STATUS
-    node_status = 0 :: int(), 
-    %% Estimated size of the DHT; Unknown value can be indicated as zero.
-    %% ≥MORE_NODE_STATUS
-    dht_size = 0 :: int()
-}).
-
--record(find_node_reply, {
-    %% Spoof ID of the requesting node;
-    %% it should be constructed from information known about
-    %% requesting contact and not easily guessed by others.
-    %% ≥ANTI_SPOOF
-    spoof_id :: int(),
-    %% Type of the replying node;
-    %% Possible values are
-    %% 0 for bootstrap node,
-    %% 1 for ordinary node and ffffffffh for unknown type.
-    %% ≥XFER_STATUS
-    node_type :: int(),
-    %% Estimated size of the DHT;
-    %% Unknown value can be indicated as zero.
-    %% ≥SIZE_ESTIMATE
-    dht_size :: int(),
-    %% Network coordinates of replying node.
-    %% ≥VIVALDI
-    network_coordinates :: network_coordinates(),
-    %% Number of carried contacts.
-    contacts_count :: short(),
-    %% List with contacts. 
-    contacts :: contacts()
-}).
-
--record(ping_reply, {
-    network_coordinates :: position()
-}).
-
--record(find_value_request, {
-    %% ID (key) to search.
-    %% Key for which the values are requested.
-    id :: binary(),
-    %% Flags for the operation.
-    flags = 0 :: byte(), 
-    %% Maximum number of returned values. 
-    max_values = 16 :: byte()
-}).
-
--record(find_value_reply, {
-    %% Indicates whether there is at least one other packet with values.
-    %% protocol version ≥DIV_AND_CONT
-    has_continuation :: boolean(), 
-    %% Indicates whether this packet carries values or contacts.
-    has_values  :: boolean(),
-    %% Number of stored contacts.
-    %% has_values == false
-    contacts_count :: short(),
-    %% Stored contacts that are close to the searched key.
-    %% has_values == false
-    contacts :: contacts(),
-    %% Network coordinates of the replying node.
-    %% HAS_VALUES == false && protocol version ≥VIVALDI_FINDVALUE
-    network_coordinates ::  network_coordinates(),
-    %% Type of key's diversification.
-    %% HAS_VALUES == true && protocol version ≥DIV_AND_CONT
-    diversification_type :: diversification_type(),
-    %% Values that match searched key.
-    %% HAS_VALUES == true
-    values % value_group() 
-}).
-
--record(transport_value, {
-    created :: long(),
-    value :: binary(),
-    originator :: contacts(),
-    flags :: byte(),
-    life_hours :: byte() | undefined,
-    replication_control :: byte() | undefined
-}).
+-include_lib("etorrent_core/include/etorrent_azdht.hrl").
 
 % gen_server callbacks
 -export([init/1,
@@ -255,12 +94,6 @@ srv_name() ->
 query_timeout() ->
     2000.
 
-search_width() ->
-    32.
-
-search_retries() ->
-    4.
-
 socket_options() ->
     [list, inet, {active, true}, {mode, binary}].
 %   ++ case etorrent_config:listen_ip() of all -> []; IP -> [{ip, IP}] end.
@@ -278,16 +111,13 @@ node_port() ->
     gen_server:call(srv_name(), get_node_port).
 
 
-contact(ProtoVer, IP, Port) ->
-    {ProtoVer, {IP, Port}}.
-
 %
 %
 %
--spec ping(contact()) -> pang | nodeid().
+-spec ping(contact()) -> term().
 ping(Contact) ->
     case gen_server:call(srv_name(), {ping, Contact}) of
-        timeout -> pang;
+        timeout -> {error, timeout};
         Values -> decode_reply_body(ping, Values)
     end.
 
@@ -298,10 +128,8 @@ ping(Contact) ->
     {'error', 'timeout'} | {nodeid(), list(nodeinfo())}.
 find_node(Contact, Target)  ->
     case gen_server:call(srv_name(), {find_node, Contact, Target}) of
-        timeout ->
-            {error, timeout};
-        Values  ->
-            decode_reply_body(find_node, Values)
+        timeout -> {error, timeout};
+        Values  -> decode_reply_body(find_node, Values)
             % TODO
 %           etorrent_dht_state:log_request_success(ID, IP, Port),
     end.
@@ -328,170 +156,6 @@ get_peers(Contact, InfoHash) ->
         Values ->
             decode_reply_body(get_peers, Values)
     end.
-
-%
-% Recursively search for the 100 nodes that are the closest to
-% the local DHT node.
-%
-% Keep tabs on:
-%     - Which nodes has been queried?
-%     - Which nodes has responded?
-%     - Which nodes has not been queried?
-% FIXME: It returns `[{649262719799963483759422800960489108797112648079,{127,0,0,2},1743},{badrpc,{127,0,0,4},1763}]'.
--spec find_node_search(nodeid()) -> list(nodeinfo()).
-find_node_search(NodeID) ->
-    Width = search_width(),
-    Retry = search_retries(),
-    Nodes = etorrent_dht_state:closest_to(NodeID, Width),
-    dht_iter_search(find_node, NodeID, Width, Retry, Nodes).
-
--spec find_node_search(nodeid(), list(nodeinfo())) -> list(nodeinfo()).
-find_node_search(NodeID, Nodes) ->
-    Width = search_width(),
-    Retry = search_retries(),
-    dht_iter_search(find_node, NodeID, Width, Retry, Nodes).
-
--spec get_peers_search(infohash()) ->
-    {list(trackerinfo()), list(peerinfo()), list(nodeinfo())}.
-get_peers_search(InfoHash) ->
-    Width = search_width(),
-    Retry = search_retries(),
-    Nodes = etorrent_dht_state:closest_to(InfoHash, Width), 
-    dht_iter_search(get_peers, InfoHash, Width, Retry, Nodes).
-
--spec get_peers_search(infohash(), list(nodeinfo())) ->
-    {list(trackerinfo()), list(peerinfo()), list(nodeinfo())}.
-get_peers_search(InfoHash, Nodes) ->
-    Width = search_width(),
-    Retry = search_retries(),
-    dht_iter_search(get_peers, InfoHash, Width, Retry, Nodes).
-    
-
-dht_iter_search(SearchType, Target, Width, Retry, Nodes)  ->
-    WithDist = [{etorrent_dht:distance(ID, Target), ID, IP, Port} || {ID, IP, Port} <- Nodes],
-    dht_iter_search(SearchType, Target, Width, Retry, 0, WithDist,
-                    gb_sets:empty(), gb_sets:empty(), []).
-
-dht_iter_search(SearchType, _, _, Retry, Retry, _,
-                _, Alive, WithPeers) ->
-    TmpAlive  = gb_sets:to_list(Alive),
-    AliveList = [{ID, IP, Port} || {_, ID, IP, Port} <- TmpAlive],
-    case SearchType of
-        find_node ->
-            AliveList;
-        get_peers ->
-            Trackers = [{ID, IP, Port, Token}
-                      ||{ID, IP, Port, Token, _} <- WithPeers],
-            Peers = [Peer || {_, _, _, _, Peers} <- WithPeers,
-                             Peer <- Peers],
-            {Trackers, Peers, AliveList}
-    end;
-
-dht_iter_search(SearchType, Target, Width, Retry, Retries,
-                Next, Queried, Alive, WithPeers) ->
-
-    % Mark all nodes in the queue as queried
-    AddQueried = [{ID, IP, Port} || {_, ID, IP, Port} <- Next],
-    NewQueried = gb_sets:union(Queried, gb_sets:from_list(AddQueried)),
-
-    ThisNode = node(),
-    Callback =
-    case SearchType of
-        find_node ->
-            fun({_,_,IP,Port}) ->
-                rpc:async_call(ThisNode, ?MODULE, find_node,
-                               [IP, Port, Target])
-                end;
-        get_peers ->
-            fun({_,_,IP,Port}) ->
-                rpc:async_call(ThisNode, ?MODULE, get_peers,
-                               [IP, Port, Target])
-                end
-    end,
-    % Query all nodes in the queue and generate a list of
-    % {Dist, ID, IP, Port, Nodes} elements
-    Promises = lists:map(Callback, Next),
-    ReturnValues = lists:map(fun rpc:yield/1, Promises),
-    WithArgs = lists:zip(Next, ReturnValues),
-
-    FailedCall = make_ref(),
-    TmpSuccessful = [case {repack, SearchType, RetVal} of
-        {repack, _, {badrpc, Reason}} ->
-%           lager:error("A RPC process crashed while sending a request ~p "
-%                       "to ~p:~p with reason ~p.",
-%                       [SearchType, IP, Port, Reason]),
-            FailedCall;
-        {repack, _, {error, timeout}} ->
-            FailedCall;
-        {repack, _, {error, response}} ->
-            FailedCall;
-        {repack, find_node, {NID, Nodes}} ->
-            {{Dist, NID, IP, Port}, Nodes};
-        {repack, get_peers, {NID, Token, Peers, Nodes}} ->
-            {{Dist, NID, IP, Port}, {Token, Peers, Nodes}}
-    end || {{Dist, _ID, IP, Port}, RetVal} <- WithArgs],
-    Successful = [E || E <- TmpSuccessful, E =/= FailedCall],
-
-    % Mark all nodes that responded as alive
-    AddAlive = [N ||{{_, _, _, _}=N, _} <- Successful],
-    NewAlive = gb_sets:union(Alive, gb_sets:from_list(AddAlive)),
-
-    % Accumulate all nodes from the successful responses.
-    % Calculate the relative distance to all of these nodes
-    % and keep the closest nodes which has not already been
-    % queried in a previous iteration
-    NodeLists = [case {acc_nodes, {SearchType, Res}} of
-        {acc_nodes, {find_node, Nodes}} ->
-            Nodes;
-        {acc_nodes, {get_peers, {_, _, Nodes}}} ->
-            Nodes
-    end || {_, Res} <- Successful],
-    AllNodes  = lists:flatten(NodeLists),
-    NewNodes  = [Node || Node <- AllNodes,
-                         not gb_sets:is_member(Node, NewQueried)],
-    NewNext   = [{etorrent_dht:distance(ID, Target), ID, IP, Port}
-                ||{ID, IP, Port} <- etorrent_dht:closest_to(Target, NewNodes, Width)],
-
-    % Check if the closest node in the work queue is closer
-    % to the target than the closest responsive node that was
-    % found in this iteration.
-    MinAliveDist = case gb_sets:size(NewAlive) of
-        0 ->
-            infinity;
-        _ ->
-            {IMinAliveDist, _, _, _} = gb_sets:smallest(NewAlive),
-            IMinAliveDist
-    end,
-
-    MinQueueDist = case NewNext of
-        [] ->
-            infinity;
-        Other ->
-            {MinDist, _, _, _} = lists:min(Other),
-            MinDist
-    end,
-
-    % Check if the closest node in the work queue is closer
-    % to the infohash than the closest responsive node.
-    NewRetries = if
-        (MinQueueDist <  MinAliveDist) -> 0;
-        (MinQueueDist >= MinAliveDist) -> Retries + 1
-    end,
-
-    % Accumulate the trackers and peers found if this is a get_peers search.
-    NewWithPeers = case SearchType of
-        find_node -> []=WithPeers;
-        get_peers ->
-            Tmp=[{ID, IP, Port, Token, Peers}
-                || {{_, ID, IP, Port},
-                    {Token, Peers, _}} <- Successful,
-                   Peers > []],
-            WithPeers ++ Tmp
-    end,
-
-    NewNext2 = lists:usort(NewNext),
-    dht_iter_search(SearchType, Target, Width, Retry, NewRetries,
-                    NewNext2, NewQueried, NewAlive, NewWithPeers).
 
 
 %
@@ -565,7 +229,6 @@ handle_info({timeout, _, IP, Port, ID}, State) ->
     {noreply, NewState};
 
 handle_info({udp, _Socket, IP, Port, Packet}, State) ->
-    #state{sent=Sent} = State,
     io:format(user, "Receiving a packet from ~p:~p~n", [IP, Port]),
     io:format(user, "~p~n", [Packet]),
     NewState =
@@ -581,22 +244,7 @@ handle_info({udp, _Socket, IP, Port, Packet}, State) ->
                 end),
             State;
         reply ->
-            {ReplyHeader, Body} = decode_reply_header(Packet),
-            #reply_header{action=ActionNum,
-                          connection_id=ConnId,
-                          protocol_version=Version} = ReplyHeader,
-            Action = action_name(ActionNum),
-            io:format(user, "Reply ~ts~n", [pretty(ReplyHeader)]),
-
-            case find_sent_query(IP, Port, ConnId, Sent) of
-                error ->
-                    State;
-                {ok, {Client, Timeout, Action}} ->
-                    _ = cancel_timeout(Timeout),
-                    _ = gen_server:reply(Client, {Action, Version, Body}),
-                    NewSent = clear_sent_query(IP, Port, ConnId, Sent),
-                    State#state{sent=NewSent}
-            end
+            handle_reply_packet(Packet, IP, Port, State)
     end,
     {noreply, NewState};
 
@@ -626,6 +274,36 @@ handle_request_packet(Packet) ->
     io:format("Decoded body: ~ts~n", [pretty(RequestBody)]),
 
     ok.
+
+handle_reply_packet(Packet, IP, Port, State=#state{sent=Sent}) ->
+    try decode_reply_header(Packet) of
+    {ReplyHeader, Body} ->
+        #reply_header{action=ActionNum,
+                      connection_id=ConnId,
+                      protocol_version=Version} = ReplyHeader,
+        io:format(user, "Reply ~ts~n", [pretty(ReplyHeader)]),
+        case action_name(ActionNum) of
+        undefined ->
+            lager:debug("Unknown action ~p.", [ActionNum]),
+            State;
+        ReplyAction ->
+            case find_sent_query(IP, Port, ConnId, Sent) of
+            error ->
+                lager:debug("Ignore unexpected packet from ~p:~p", [IP, Port]),
+                State;
+            {ok, {Client, Timeout, _RequestAction}} ->
+                _ = cancel_timeout(Timeout),
+                _ = gen_server:reply(Client, {ReplyAction, Version, Body}),
+                NewSent = clear_sent_query(IP, Port, ConnId, Sent),
+                State#state{sent=NewSent}
+            end
+        end
+    catch error:Reason ->
+            Trace = erlang:get_stacktrace(),
+            lager:error("Decoding error ~p.~nTrace: ~s.",
+                        [Reason, format_trace(Trace)]),
+            State
+    end.
 
 do_send_query(Action, Args, {Version, {IP, Port}}, From, State) ->
     #state{sent=Sent,
@@ -929,6 +607,16 @@ decode_request_body(find_node, Version, Bin) ->
 decode_request_body(Action, Version, Bin) ->
     {unknown, Bin}.
 
+
+decode_reply_body(_Action, {error, Version, Bin}) ->
+    try decode_error(Version, Bin) of
+        {Rec, _Bin} -> {error, Rec}
+        catch error:Reason ->
+            Trace = erlang:get_stacktrace(),
+            lager:error("Decoding error ~p.~nTrace: ~s.",
+                        [Reason, format_trace(Trace)]),
+            {error, Reason}
+    end;
 decode_reply_body(Action, {Action, Version, Bin}) ->
     try decode_reply_body(Action, Version, Bin) of
         {Rec, _Bin} -> {ok, Rec}
@@ -938,7 +626,6 @@ decode_reply_body(Action, {Action, Version, Bin}) ->
                         [Reason, format_trace(Trace)]),
             {error, Reason}
     end;
-
 decode_reply_body(ExpectedAction, {ReceivedAction, _Version, _Bin}) ->
     {error, {action_mismatch, ExpectedAction, ReceivedAction}}.
 
@@ -1020,6 +707,8 @@ decode_reply_body(ping, Version, Bin) ->
             },
     {Reply, Bin1}.
 
+decode_error(Version, Bin) ->
+    {'TODO', Bin}.
 
 decode_request_header(Bin) ->
     {ConnId,  Bin1} = decode_long(Bin),
@@ -1106,80 +795,6 @@ packet_type(<<1:1, _/bitstring>>) -> request;
 packet_type(<<0:1, _/bitstring>>) -> reply.
 
 
-higher_or_equal_version(VersionName1, VersionName2) ->
-    proto_version_num(VersionName1) >=
-    proto_version_num(VersionName2).
-
-lower_version(VersionName1, VersionName2) ->
-    proto_version_num(VersionName1) <
-    proto_version_num(VersionName2).
-
-proto_version_num(VersionNum) when is_integer(VersionNum) ->
-    VersionNum;
-proto_version_num(VersionName) ->
-    case VersionName of
-    div_and_cont         -> 6;
-    anti_spoof           -> 7;
-    anti_spoof2          -> 8;
-    fix_originator       -> 9;
-    networks             -> 9;
-    vivaldi              -> 10;
-    remove_dist_add_ver  -> 11;
-    xfer_status          -> 12;
-    size_estimate        -> 13;
-    vendor_id            -> 14;
-    block_keys           -> 14;
-    generic_netpos       -> 15;
-    vivaldi_findvalue    -> 16;
-    anon_values          -> 17;
-    cvs_fix_overload_v1  -> 18;
-    cvs_fix_overload_v2  -> 19;
-    more_stats           -> 20;
-    cvs_fix_overload_v3  -> 21;
-    more_node_status     -> 22;
-    longer_life          -> 23;
-    replication_control  -> 24;
-    restrict_id_ports    -> 32;
-    restrict_id_ports2   -> 33;
-    restrict_id_ports2x  -> 34;
-    restrict_id_ports2y  -> 35;
-    restrict_id_ports2z  -> 36;
-    restrict_id3         -> 50;
-    minimum_acceptable   -> 16;
-    supported            -> 50
-    end.
-
-
-action_request_num(ActionName) when is_atom(ActionName) ->
-    case ActionName of
-        ping       -> 1024;
-        find_node  -> 1028;
-        find_value -> 1030;
-        _          -> undefined
-    end.
-
-action_reply_num(ActionName) when is_atom(ActionName) ->
-    case ActionName of
-        ping       -> 1025;
-        find_node  -> 1029;
-        find_value -> 1031;
-        _          -> undefined
-    end.
-
-action_name(ActionNum) when is_integer(ActionNum) ->
-    case ActionNum of
-        1024 -> ping;
-        1025 -> ping;
-        1028 -> find_node;
-        1029 -> find_node;
-        1030 -> find_value;
-        1031 -> find_value;
-        _    -> undefined
-    end.
-
-diversification_type(1) -> none;
-diversification_type(2) -> frequency;
-diversification_type(3) -> size.
 
 milliseconds_since_epoch() ->
     {MegaSeconds, Seconds, MicroSeconds} = os:timestamp(),
@@ -1346,4 +961,5 @@ format_arity([H|T]) ->
      ")"];
 format_arity(_) ->
     io_lib:format("", []).
+
 
