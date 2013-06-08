@@ -7,6 +7,11 @@
 -endif.
 
 -behaviour(gen_server).
+-import(etorrent_azdht, [
+        compact_contact/1,
+        compact_contacts/1,
+        node_id/1]).
+
 
 
 % Public interface
@@ -23,7 +28,7 @@
          code_change/3]).
 
 -record(state, {
-    key, encoded_key, contacts
+    key, encoded_key, contacts, waiting_contacts 
 }).
 
 %
@@ -45,24 +50,49 @@ find_value(Key, Contacts) ->
 %% ==================================================================
 
 init([Key, Contacts]) ->
-    [async_ping(Contact) || Contact <- Contacts],
+    EncodedKey = encode_key(Key),
+    [async_find_value(Contact, EncodedKey) || Contact <- Contacts],
     State = #state{key=Key,
-                   encoded_key=encode_key(Key),
-                   contacts=Contacts},
+                   encoded_key=EncodedKey,
+                   contacts=sets:from_list(Contacts),
+                   waiting_contacts=[]},
+    schedule_next_step(),
     {ok, State}.
 
 handle_call(x, From, State) ->
     {reply, x, State}.
 
-handle_cast({async_ping_reply, Contact, Reply}, State) ->
-    lager:debug("Received ping reply from ~p.", [Contact]),
+handle_cast({async_find_value_reply, Contact,
+             #find_value_reply{has_values=false, contacts=ReceivedContacts}},
+             #state{contacts=Contacts, waiting_contacts=WaitingContacts,
+                    encoded_key=EncodedKey}=State) ->
+    lager:debug("Received reply from ~p with contacts:~n~p",
+                [compact_contact(Contact), compact_contacts(ReceivedContacts)]),
+    Contacts1 = drop_farther_contacts(ReceivedContacts, Contact, EncodedKey),
+    Contacts2 = drop_duplicates(Contacts1, Contacts),
+    {noreply, State#state{waiting_contacts=Contacts2 ++ WaitingContacts}};
+handle_cast({async_find_value_reply, Contact,
+             #find_value_reply{has_values=true, values=Values}}, State) ->
+    lager:debug("Received reply from ~p with values:~n~p",
+                [compact_contact(Contact), Values]),
     {noreply, State};
-handle_cast({async_ping_error, Contact, Reason}, State) ->
-    lager:debug("~p is unreachable. Reason ~p.", [Contact, Reason]),
+handle_cast({async_find_value_error, Contact, Reason}, State) ->
+    lager:debug("~p is unreachable. Reason ~p.",
+                [compact_contact(Contact), Reason]),
     {noreply, State}.
 
-handle_info(_, State) ->
-    {noreply, State}.
+handle_info(next_step,
+            State=#state{encoded_key=EncodedKey,
+                         contacts=Contacts,
+                         waiting_contacts=WaitingContacts}) ->
+    BestContacts = best_contacts(WaitingContacts, EncodedKey),
+    lager:debug("Best contacts:~n~p", [BestContacts]),
+    [async_find_value(Contact, EncodedKey) || Contact <- BestContacts],
+    State2 = State#state{waiting_contacts=[],
+                         contacts=sets:union(sets:from_list(BestContacts),
+                                             Contacts)},
+    schedule_next_step(),
+    {noreply, State2}.
 
 terminate(_, _State) ->
     ok.
@@ -73,10 +103,10 @@ code_change(_, _, State) ->
 %% ==================================================================
 
 
-async_find_value(Contact, Key) ->
+async_find_value(Contact, EncodedKey) ->
     Parent = self(),
     spawn_link(fun() ->
-            case etorrent_azdht_net:find_value(Contact, Key) of
+            case etorrent_azdht_net:find_value(Contact, EncodedKey) of
                 {ok, Reply} ->
                     gen_server:cast(Parent, {async_find_value_reply, Contact, Reply});
                 {error, Reason} ->
@@ -84,21 +114,30 @@ async_find_value(Contact, Key) ->
             end
         end).
 
-async_ping(Contact) ->
-    Parent = self(),
-    spawn_link(fun() ->
-            case etorrent_azdht_net:ping(Contact) of
-                {ok, Reply} ->
-                    gen_server:cast(Parent, {async_ping_reply, Contact, Reply});
-                {error, Reason} ->
-                    gen_server:cast(Parent, {async_ping_error, Contact, Reason})
-            end
-        end).
-
-
 encode_key(Key) ->
     crypto:sha(Key).
 
 compute_distance(<<ID1:160>>, <<ID2:160>>) ->
     <<(ID1 bxor ID2):160>>.
-    
+
+
+%% Returns all contacts with distance lower than the distance beetween
+%% `BaseContact' and `EncodedKey'.
+drop_farther_contacts(Contacts, BaseContact, EncodedKey) ->
+    BaseDistance = compute_distance(node_id(BaseContact), EncodedKey),
+    [C || C <- Contacts, compute_distance(node_id(C), EncodedKey) < BaseDistance].
+
+drop_duplicates(UnfilteredContacts, ContactSet) ->
+    [C || C <- UnfilteredContacts, not sets:is_element(C, ContactSet)].
+
+best_contacts(Contacts, EncodedKey) ->
+    D2C1 = [{compute_distance(node_id(C), EncodedKey), C} || C <- Contacts],
+    D2C2 = lists:usort(D2C1),
+    Best = lists:sublist(D2C2, 32),
+    [C || {_D,C} <- Best].
+
+
+
+schedule_next_step() ->
+    erlang:send_after(5000, self(), next_step),
+    ok.

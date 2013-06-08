@@ -1,7 +1,13 @@
 %% @doc AZDHT utility functions.
 -module(etorrent_azdht).
--export([contact/3,
+-export([contact/1,
+         contact/2,
+         contact/3,
+         contacts/1,
+         compact_contact/1,
+         compact_contacts/1,
          node_id/1,
+         node_id/3,
          higher_or_equal_version/2,
          lower_version/2,
          proto_version_num/1,
@@ -11,31 +17,49 @@
          diversification_type/1
         ]).
 
+-include_lib("etorrent_core/include/etorrent_azdht.hrl").
 
 %% Long.MAX_VALUE = 9223372036854775807 = 2^63-1
 -define(MAX_LONG, (1 bsl 63 - 1)).
 
--type proto_version() :: atom() | non_neg_integer().
--type address() :: {inet:ip_address(), inet:port_number()}.
--type contact() :: {proto_version(), address()}.
--type node_id() :: <<_:160>>.
+-spec contact(proto_version(), address()) -> contact().
+contact(ProtoVer, {IP, Port}) ->
+    contact(ProtoVer, IP, Port).
 
--spec contact(proto_version(), inet:ip_address(), inet:port_number()) ->
+-spec contact(proto_version(), ipaddr(), portnum()) ->
     contact().
 contact(ProtoVer, IP, Port) ->
-    {ProtoVer, {IP, Port}}.
+    #contact{version=ProtoVer,
+             address={IP, Port},
+             node_id=node_id(ProtoVer, IP, Port)}.
 
+%% Create a contact from the compact form.
+contact({ProtoVer, IP, Port}) ->
+    contact(ProtoVer, IP, Port).
+
+contacts(Constants) ->
+    [contact(Constant) || Constant <- Constants].
+
+%% Make contacts easy to print and read.
+compact_contacts(Contacts) ->
+    [compact_contact(Contact) || Contact <- Contacts].
+compact_contact(#contact{version=ProtoVer, address={IP, Port}}) ->
+    {ProtoVer, IP, Port}.
 
 %% Node ID calculation
 %% ===================
 
-%% See DHTUDPUtils.getNodeID(InetSocketAddress, byte) in vuze.
 -spec node_id(contact()) -> node_id().
-node_id(Contact) ->
-    crypto:sha(node_id_key(Contact)).
+node_id(#contact{node_id=NodeId}) ->
+    NodeId.
 
--spec node_id_key(contact()) -> iolist().
-node_id_key({Version, {IP, Port}}) ->
+%% See DHTUDPUtils.getNodeID(InetSocketAddress, byte) in vuze.
+-spec node_id(proto_version(), ipaddr(), portnum()) -> node_id().
+node_id(ProtoVer, IP, Port) ->
+    crypto:sha(node_id_key(ProtoVer, IP, Port)).
+
+-spec node_id_key(proto_version(), ipaddr(), portnum()) -> iolist().
+node_id_key(Version, IP, Port) ->
     case {version_to_key_type(Version), ip_version(IP)} of
         {uow, ipv4}          -> uow_key({IP, Port});
         %% stick with existing approach for IPv6 at the moment
@@ -95,7 +119,7 @@ restrict_ports_key({IP, Port}) ->
     io_lib:format("~s:~B", [print_ip(IP), Port rem 1999]).
 
 simple_key({IP, Port}) ->
-    io_lib:format("~s:~B", [IP, Port]).
+    io_lib:format("~s:~B", [print_ip(IP), Port]).
 
 ip_version(IP) ->
     case tuple_size(IP) of

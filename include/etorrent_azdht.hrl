@@ -15,9 +15,9 @@
 -type network_coordinates() :: term().
 -type transaction_id() :: non_neg_integer().
 -type instance_id() :: non_neg_integer().
--type contact() :: term().
--type contacts() :: [contact()].
 -type position_version() :: atom().
+-type node_id() :: <<_:160>>.
+-type proto_version() :: atom() | non_neg_integer().
 
 -record(position, {
     x = 0 :: float(),
@@ -26,6 +26,15 @@
     error = 0 :: float(),
     type :: position_version()
 }).
+
+-record(contact, {
+    version :: proto_version(),
+    address :: address(),
+    node_id :: node_id()
+}).
+
+-type contact() :: #contact{}.
+-type contacts() :: [contact()].
 
 -type position() :: #position{}.
 -type diversification_type() :: none | frequency | size.
@@ -121,7 +130,7 @@
 }).
 
 -record(find_value_request, {
-    %% ID (key) to search.
+    %% ID (encoded key) to search.
     %% Key for which the values are requested.
     id :: binary(),
     %% Flags for the operation.
@@ -155,8 +164,9 @@
 
 -record(transport_value, {
     created :: long(),
+    %% <<"26261;C">> or <<"21710">>.
     value :: binary(),
-    originator :: contacts(),
+    originator :: contact(),
     flags :: byte(),
     life_hours :: byte() | undefined,
     replication_control :: byte() | undefined

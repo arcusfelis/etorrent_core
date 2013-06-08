@@ -76,6 +76,7 @@
     tokens :: queue(),
 
     node_address :: address(),
+    local_contact :: contact(),
     next_transaction_id :: transaction_id(),
     instance_id :: instance_id()
 }).
@@ -92,7 +93,7 @@ srv_name() ->
    azdht_socket_server.
 
 query_timeout() ->
-    2000.
+    3000.
 
 socket_options() ->
     [list, inet, {active, true}, {mode, binary}].
@@ -135,8 +136,8 @@ find_node(Contact, Target)  ->
     end.
 
 
-find_value(Contact, Target) ->
-    case gen_server:call(srv_name(), {find_value, Contact, Target}) of
+find_value(Contact, EncodedKey) ->
+    case gen_server:call(srv_name(), {find_value, Contact, EncodedKey}) of
         timeout ->
             {error, timeout};
         Values  ->
@@ -174,8 +175,11 @@ announce(Contact, InfoHash, Token, BTPort) ->
 
 init([DHTPort, ExternalIP]) ->
     {ok, Socket} = gen_udp:open(DHTPort, socket_options()),
+    LocalContact = etorrent_azdht:contact(proto_version_num(supported),
+                                          ExternalIP, DHTPort),
     State = #state{socket=Socket,
                    sent=gb_trees:empty(),
+                   local_contact=LocalContact,
                    node_address={ExternalIP, DHTPort},
                    next_transaction_id=new_transaction_id(),
                    instance_id=new_instance_id()},
@@ -191,9 +195,9 @@ handle_call({find_node, Contact, Target}, From, State) ->
     Args = #find_node_request{id=Target},
     do_send_query(Action, Args, Contact, From, State);
 
-handle_call({find_value, Contact, Key}, From, State) ->
+handle_call({find_value, Contact, EncodedKey}, From, State) ->
     Action = find_value,
-    Args = #find_value_request{id=Key},
+    Args = #find_value_request{id=EncodedKey},
     do_send_query(Action, Args, Contact, From, State);
 
 handle_call({get_peers, Contact, InfoHash}, From, State) ->
@@ -305,7 +309,8 @@ handle_reply_packet(Packet, IP, Port, State=#state{sent=Sent}) ->
             State
     end.
 
-do_send_query(Action, Args, {Version, {IP, Port}}, From, State) ->
+do_send_query(Action, Args, #contact{version=Version,
+                                     address={IP, Port}}, From, State) ->
     #state{sent=Sent,
            socket=Socket} = State,
     #state{sent=Sent,
@@ -427,6 +432,13 @@ decode_boolean(<<1, T/binary>>) -> {true, T}.
 decode_sized_binary(<<Len, H:Len/binary, T/binary>>) ->
     {H, T}.
 
+decode_sized_binary2(<<Len:16/big-integer, H:Len/binary, T/binary>>) ->
+    {H, T}.
+
+decode_diversification_type(<<Type, Bin/binary>>) ->
+    {diversification_type(Type), Bin}.
+
+
 %% First byte indicates length of the IP address (4 for IPv4, 16 for IPv6);
 %% next comes the address in network byte order;
 %% the last value is port number as short
@@ -439,7 +451,7 @@ decode_address(<<4, A, B, C, D, Port:16/big-integer, T/binary>>) ->
 %% the rest is an address.
 decode_contact(<<1, ProtoVer, T/binary>>) ->
     {Address, T1} = decode_address(T),
-    {{ProtoVer, Address}, T1}.
+    {etorrent_azdht:contact(ProtoVer, Address), T1}.
 
 
 decode_contacts(Bin) ->
@@ -455,16 +467,16 @@ decode_contacts_n(Bin, Left, Acc) ->
 
 %% transport/udp/impl/DHTUDPUtils.deserialiseTransportValues
 decode_value_group(Bin, Version) ->
-    {ValueCount, Bin1} = decode_value(Bin, Version),
+    {ValueCount, Bin1} = decode_short(Bin),
     decode_values_n(Bin1, Version, ValueCount, []).
 
 decode_values_n(Bin, _Version, 0, Acc) ->
     {lists:reverse(Acc), Bin};
 decode_values_n(Bin, Version, Left, Acc) ->
-    {Value, Bin1} = decode_value(Version, Bin),
+    {Value, Bin1} = decode_value(Bin, Version),
     decode_values_n(Bin1, Version, Left-1, [Value|Acc]).
 
-decode_value(PacketVersion, Bin) ->
+decode_value(Bin, PacketVersion) ->
     {Version, Bin1} =
     case higher_or_equal_version(PacketVersion, remove_dist_add_ver) of
         true  -> decode_int(Bin);
@@ -472,7 +484,8 @@ decode_value(PacketVersion, Bin) ->
     end,
     %% final long  created     = is.readLong() + skew;
     {Created, Bin2} = decode_long(Bin1),
-    {Value, Bin3} = decode_sized_binary(Bin2),
+    %% MAX_VALUE_SIZE = 512
+    {Value, Bin3} = decode_sized_binary2(Bin2),
     {Originator, Bin4} = decode_contact(Bin3),
     {Flags, Bin5} = decode_byte(Bin4),
     {LifeHours, Bin6} =
@@ -672,7 +685,7 @@ decode_reply_body(find_value, Version, Bin) ->
             %% Decode values.
             {DivType, BinV1} =
             case higher_or_equal_version(Version, div_and_cont) of
-                 true -> diversification_type(decode_byte(Bin2));
+                 true -> decode_diversification_type(Bin2);
                  false -> {none, Bin2}
             end,
             {Values, _} = decode_value_group(BinV1, Version),
@@ -885,6 +898,50 @@ decode_find_node_reply_v51_test() ->
     io:format(user, "ReplyHeader ~p~n", [ReplyHeader]),
     ReplyBody = decode_reply_body(find_node, 51, EncodedBody),
     io:format(user, "ReplyBody ~p~n", [ReplyBody]),
+    ok.
+
+decode_find_value_reply_with_values_v50_test() ->
+    %% #reply_header{action = 1031,transaction_id = 3814337,
+    %%        connection_id = 9752011279686643679,protocol_version = 50,
+    %%        vendor_id = 0,network_id = 0,instance_id = 2951449045}
+    Encoded =
+<<0,0,4,7,0,175,240,41,185,148,181,7,211,155,229,131,50,0,0,0,0,0,158,59,199,
+  160,
+  %% Body start.
+  %% has_continuation, has_values, diversification_type, value count
+  0,1,1, 0,16,
+  %% 1370646969 (int) and 1370704828459 (long). now() is {1370,719297,957191}.
+  81,178,105,185, 0,0,1,63,36,95,216,43,
+  0,7,50,54,50,54,49,59,67,
+  1,51,4,88,207,176,62,102,149,
+  %% flags, life_hours, rep_control
+  2,0,255,
+  81,154,42,253, 0,0,1,63, 36,88,116,8,0,
+  5,50,49,55,49,48,
+  1,51,4,209,89,161,167,84,206,
+  2,0,255,
+  81,175,61,85,0,0,1,63, 36,
+  122,130,128,0,7,51,55,49,52,57,59,67,1,51,4,60,241,15,105,145,29,2,0,255,81,
+  178,13,107,0,0,1,63,35,1,49,5,0,5,49,54,49,57,54,1,51,4,83,177,171,201,63,67,
+  2,0,255,81,178,199,67,0,0,1,63,35,66,114,44,0,5,49,48,51,57,50,1,51,4,183,
+  157,160,3,40,152,2,0,255,81,176,251,244,0,0,1,63,35,71,109,220,0,1,48,1,51,4,
+  186,207,113,221,249,71,0,0,255,81,178,218,171,0,0,1,63,34,238,210,255,0,5,50,
+  52,48,53,49,1,51,4,117,136,10,194,93,243,2,0,255,81,176,23,188,0,0,1,63,35,
+  165,18,138,0,5,51,49,49,51,57,1,51,4,98,179,10,35,121,163,2,0,255,81,178,51,
+  5,0,0,1,63,35,134,245,230,0,5,51,56,50,48,50,1,51,4,62,216,212,19,149,58,2,0,
+  255,81,179,95,179,0,0,1,63,36,173,8,109,0,7,53,48,54,49,52,59,67,1,51,4,201,
+  3,185,215,197,182,2,0,255,81,179,2,55,0,0,1,63,35,65,99,174,0,5,51,56,55,57,
+  54,1,51,4,190,234,75,40,151,140,2,0,255,81,178,158,133,0,0,1,63,35,114,43,55,
+  0,5,49,54,48,54,48,1,51,4,190,152,196,103,62,188,2,0,255,81,173,198,175,0,0,
+  1,63,35,114,140,38,0,7,50,50,53,55,56,59,67,1,51,4,86,46,168,242,88,50,2,0,
+  255,81,178,170,7,0,0,1,63,35,77,192,251,0,5,51,48,49,56,51,1,51,4,190,79,23,
+  78,117,231,2,0,255,81,178,254,117,0,0,1,63,35,199,12,90,0,5,49,50,52,54,48,1,
+  51,4,182,68,97,193,48,172,2,0,255,81,175,52,94,0,0,1,63,35,221,119,221,0,5,
+  54,48,53,56,48,1,51,4,98,169,170,101,236,164,2,0,255>>,
+    {ReplyHeader, EncodedBody} = decode_reply_header(Encoded),
+    io:format(user, "ReplyHeader ~p~n", [ReplyHeader]),
+    ReplyBody = decode_reply_body(find_value, 50, EncodedBody),
+    io:format(user, "ReplyBody ~s~n", [pretty(ReplyBody)]),
     ok.
 
 
