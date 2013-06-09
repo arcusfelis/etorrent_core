@@ -28,7 +28,8 @@
          code_change/3]).
 
 -record(state, {
-    key, encoded_key, contacts, waiting_contacts 
+    key, encoded_key, called_contacts, waiting_contacts,
+    collected_values, answered_contacts, answered_count
 }).
 
 %
@@ -54,8 +55,11 @@ init([Key, Contacts]) ->
     [async_find_value(Contact, EncodedKey) || Contact <- Contacts],
     State = #state{key=Key,
                    encoded_key=EncodedKey,
-                   contacts=sets:from_list(Contacts),
-                   waiting_contacts=[]},
+                   called_contacts=sets:from_list(Contacts),
+                   waiting_contacts=[],
+                   collected_values=[],
+                   answered_count=0,
+                   answered_contacts=sets:new()},
     schedule_next_step(),
     {ok, State}.
 
@@ -63,8 +67,10 @@ handle_call(x, From, State) ->
     {reply, x, State}.
 
 handle_cast({async_find_value_reply, Contact,
-             #find_value_reply{has_values=false, contacts=ReceivedContacts}},
-             #state{contacts=Contacts, waiting_contacts=WaitingContacts,
+             #find_value_reply{has_values=false,
+                               contacts=ReceivedContacts}},
+             #state{called_contacts=Contacts,
+                    waiting_contacts=WaitingContacts,
                     encoded_key=EncodedKey}=State) ->
     lager:debug("Received reply from ~p with contacts:~n~p",
                 [compact_contact(Contact), compact_contacts(ReceivedContacts)]),
@@ -72,25 +78,49 @@ handle_cast({async_find_value_reply, Contact,
     Contacts2 = drop_duplicates(Contacts1, Contacts),
     {noreply, State#state{waiting_contacts=Contacts2 ++ WaitingContacts}};
 handle_cast({async_find_value_reply, Contact,
-             #find_value_reply{has_values=true, values=Values}}, State) ->
+             #find_value_reply{has_values=true, values=Values}},
+             #state{answered_count=AnsweredCount,
+                    answered_contacts=Answered,
+                    collected_values=CollectedValues}=State) ->
     lager:debug("Received reply from ~p with values:~n~p",
                 [compact_contact(Contact), Values]),
-    {noreply, State};
+    State2 = State#state{answered_count=AnsweredCount+1,
+                         answered_contacts=sets:add_element(Contact, Answered),
+                         collected_values=Values ++ CollectedValues},
+    {noreply, State2};
 handle_cast({async_find_value_error, Contact, Reason}, State) ->
     lager:debug("~p is unreachable. Reason ~p.",
                 [compact_contact(Contact), Reason]),
     {noreply, State}.
 
 handle_info(next_step,
+            State=#state{key=Key,
+                         waiting_contacts=[],
+                         collected_values=[]}) ->
+    lager:debug("Key ~p was not found.", [Key]),
+    {noreply, State};
+handle_info(next_step,
+            State=#state{collected_values=Values,
+                         answered_count=AnsweredCount}) when AnsweredCount > 3 ->
+    lager:debug("Values ~p", [Values]),
+    {noreply, State};
+handle_info(next_step,
+            State=#state{collected_values=Values,
+                         waiting_contacts=[],
+                         answered_count=AnsweredCount}) when AnsweredCount > 0 ->
+    lager:debug("Not enough nodes were called. Values ~p", [Values]),
+    {noreply, State};
+handle_info(next_step,
             State=#state{encoded_key=EncodedKey,
-                         contacts=Contacts,
+                         called_contacts=Contacts,
                          waiting_contacts=WaitingContacts}) ->
+    %% Run the next search iteration.
     BestContacts = best_contacts(WaitingContacts, EncodedKey),
     lager:debug("Best contacts:~n~p", [BestContacts]),
     [async_find_value(Contact, EncodedKey) || Contact <- BestContacts],
     State2 = State#state{waiting_contacts=[],
-                         contacts=sets:union(sets:from_list(BestContacts),
-                                             Contacts)},
+                         called_contacts=sets:union(sets:from_list(BestContacts),
+                                                    Contacts)},
     schedule_next_step(),
     {noreply, State2}.
 

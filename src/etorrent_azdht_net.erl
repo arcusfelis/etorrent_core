@@ -499,6 +499,7 @@ decode_value(Bin, PacketVersion) ->
         false -> decode_none(Bin6)
     end,
     ValueRec = #transport_value{
+        version = Version,
         created = Created,
         value = Value,
         originator = Originator,
@@ -512,6 +513,7 @@ encode_byte(X)  when is_integer(X) -> <<X>>.
 encode_short(X) when is_integer(X) -> <<X:16/big-integer>>.
 encode_int(X)   when is_integer(X) -> <<X:32/big-integer>>.
 encode_long(X)  when is_integer(X) -> <<X:64/big-integer>>.
+encode_none() -> [].
 
 encode_boolean(true)  -> <<1>>;
 encode_boolean(false) -> <<0>>.
@@ -522,15 +524,21 @@ encode_boolean(false) -> <<0>>.
 encode_address({{A,B,C,D}, Port}) ->
     <<4, A, B, C, D, Port:16/big-integer>>.
 
+encode_contacts(Contacts) -> 
+    ContactsCount = length(Contacts),
+    [encode_short(ContactsCount), [encode_contact(Rec) || Rec <- Contacts]].
 
 %% First byte indicates contact type, which must be UDP (1);
 %% second byte indicates the contact's protocol version;
 %% the rest is an address.
-encode_contact({ProtoVer, Address}) ->
+encode_contact(#contact{version=ProtoVer, address=Address}) ->
     <<1, ProtoVer, (encode_address(Address))/binary>>.
 
 encode_sized_binary(ID) when is_binary(ID) ->
     [encode_byte(byte_size(ID)), ID].
+
+encode_sized_binary2(ID) when is_binary(ID) ->
+    [encode_short(byte_size(ID)), ID].
 
 encode_request_header(#request_header{
         connection_id=ConnId,
@@ -572,6 +580,38 @@ encode_reply_header(#reply_header{
      encode_int(NetworkId),
      encode_int(InstanceId)
     ].
+
+encode_value_group(Values, Version) ->
+    ValueCount = length(Values),
+    [encode_short(ValueCount), [encode_value(Rec, Version) || Rec <- Values]].
+
+%% see decode_value/2
+encode_value(ValueRec=#transport_value{}, PacketVersion) ->
+    #transport_value{
+        version = Version,
+        created = Created,
+        value = Value,
+        originator = Originator,
+        flags = Flags,
+        life_hours = LifeHours,
+        replication_control = RepControl} = ValueRec,
+    [
+    case higher_or_equal_version(PacketVersion, remove_dist_add_ver) of
+        true  -> encode_int(Version);
+        false -> encode_none()
+    end,
+    encode_long(Created),
+    encode_sized_binary2(Value),
+    decode_contact(Originator),
+    encode_byte(Flags),
+    case higher_or_equal_version(PacketVersion, longer_life) of
+        true  -> encode_byte(LifeHours);
+        false -> encode_none()
+    end,
+    case higher_or_equal_version(PacketVersion, replication_control) of
+        true  -> encode_byte(RepControl);
+        false -> encode_none()
+    end].
 
 
 encode_request_body(find_node, Version, #find_node_request{

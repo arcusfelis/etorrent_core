@@ -163,6 +163,7 @@
 }).
 
 -record(transport_value, {
+    version :: int(),
     created :: long(),
     %% <<"26261;C">> or <<"21710">>.
     value :: binary(),
