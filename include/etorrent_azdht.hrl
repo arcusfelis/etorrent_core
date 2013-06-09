@@ -1,4 +1,4 @@
-
+-define(K, 20).
 -type nodeinfo() :: etorrent_types:nodeinfo().
 -type peerinfo() :: etorrent_types:peerinfo().
 -type infohash() :: etorrent_types:infohash().

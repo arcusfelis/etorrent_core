@@ -17,7 +17,16 @@
          diversification_type/1
         ]).
 
+%% Spoof id
+-export([generate_spoof_key/0,
+         spoof_id/4]).
+
+
 -include_lib("etorrent_core/include/etorrent_azdht.hrl").
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
 
 %% Long.MAX_VALUE = 9223372036854775807 = 2^63-1
 -define(MAX_LONG, (1 bsl 63 - 1)).
@@ -134,6 +143,52 @@ print_ip({_,_,_,_, _,_,_,_}=IP) ->
     io_lib:format("~4.16.0B:~4.16.0B:~4.16.0B:~4.16.0B:"
                   "~4.16.0B:~4.16.0B:~4.16.0B:~4.16.0B", tuple_to_list(IP)).
 
+%% Spoof ID
+%% ========
+
+furthest_contact(MyContact) ->
+    MyID = node_id(MyContact),
+    CFactor = ?K * 2,
+    %% Get alive nodes.
+    Closest = etorrent_azdht_router:closest_to(MyID, CFactor, true),
+    lists:last(Closest).
+
+%% For main network (not CVS).
+%% see control/impl/DHTControlImpl.java:generateSpoofID(originator_contact)
+spoof_id(#contact{}=Contact, MyContact, FurthestContact, Key) ->
+    FurthestID = node_id(FurthestContact),
+    OriginatorID = node_id(Contact),
+    MyID = node_id(MyContact),
+    %% make sure the originator is in our group
+    Diff = compute_and_compare_distances(FurthestID, OriginatorID, MyID),
+    if Diff < 0 -> 0;
+       true -> generate_spoof_id(Contact, Key)
+    end.
+
+generate_spoof_id(#contact{address={IP,_Port}}, Key) ->
+    Text = case IP of
+               {A,B,C,D}          -> <<A,B,C,D,4,4,4,4>>;
+               {A,B,C,D, _,_,_,_} -> <<A:16,B:16,C:16,D:16>>
+           end,
+    <<SpoofId:32/big, _/binary>> = crypto:des_ecb_encrypt(Key, Text),
+    SpoofId.
+ 
+ 
+-spec compute_and_compare_distances(ID1, ID2, Pivot) -> integer() when
+    ID1 :: node_id(),
+    ID2 :: node_id(),
+    Pivot :: node_id().
+compute_and_compare_distances(<<H1,T1/binary>>,
+                              <<H2,T2/binary>>,
+                              <<H3,T3/binary>>) ->
+    D1 = H1 bxor H3,
+    D2 = H2 bxor H3,
+    case D1 - D2 of
+        0 -> compute_and_compare_distances(T1, T2, T3);
+        Diff -> Diff
+    end;
+compute_and_compare_distances(<<>>, <<>>, <<>>) -> 0.
+
 
 %% Constants
 %% =========
@@ -214,3 +269,38 @@ diversification_type(1) -> none;
 diversification_type(2) -> frequency;
 diversification_type(3) -> size.
 
+%% Crypto
+%% ======
+
+%% Pad with bytes all of the same value as the number of padding bytes
+%% This is the method recommended in [PKCS5], [PKCS7], and [CMS].
+%% http://www.di-mgt.com.au/cryptopad.html
+pkcs5_padding(Bin) when is_binary(Bin) ->
+    case byte_size(Bin) of
+        0 -> <<8,8,8,8,8,8,8,8>>;
+        1 -> <<Bin/binary,7,7,7,7,7,7,7>>;
+        2 -> <<Bin/binary,6,6,6,6,6,6>>;
+        3 -> <<Bin/binary,5,5,5,5,5>>;
+        4 -> <<Bin/binary,4,4,4,4>>;
+        5 -> <<Bin/binary,3,3,3>>;
+        6 -> <<Bin/binary,2,2>>;
+        7 -> <<Bin/binary,1>>;
+        8 -> Bin
+    end.
+
+generate_spoof_key() ->
+    crypto:strong_rand_bytes(8).
+
+-ifdef(TEST).
+%% DES INPUT BLOCK  = f  o  r  _  _  _  _  _
+%% (IN HEX)           66 6F 72 05 05 05 05 05
+%% KEY              = 01 23 45 67 89 AB CD EF
+%% DES OUTPUT BLOCK = FD 29 85 C9 E8 DF 41 40
+pkcs5_padding_test_() ->
+    crypto:start(),
+    [?_assertEqual(crypto:des_ecb_encrypt(<<16#0123456789ABCDEF:64>>,
+                                          <<16#666F720505050505:64>>),
+                   <<16#FD2985C9E8DF4140:64>>),
+     ?_assertEqual(pkcs5_padding(<<16#666F72:24>>),
+                   <<16#666F720505050505:64>>)].
+-endif.
