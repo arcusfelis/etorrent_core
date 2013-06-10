@@ -18,6 +18,8 @@
 -type position_version() :: atom().
 -type node_id() :: <<_:160>>.
 -type proto_version() :: atom() | non_neg_integer().
+-type key() :: binary().
+-type diversification() :: int().
 
 -record(position, {
     x = 0 :: float(),
@@ -160,6 +162,23 @@
     %% Values that match searched key.
     %% HAS_VALUES == true
     values % value_group() 
+}).
+
+-record(store_request, {
+    %% Spoof ID of the target node;
+    %% it must be the same number as previously retrived
+    %% through FIND_NODE reply.
+    %% ≥ANTI_SPOOF
+    spoof_id :: int(),
+    %% Keys that the target node should store.
+    keys :: [key()],
+    %% Groups of values, one for each key;
+    %% values are stored in the same order as keys.
+    value_groups % [value_group()]
+}).
+
+-record(store_reply, {
+    diversifications :: [diversification()]
 }).
 
 -record(transport_value, {

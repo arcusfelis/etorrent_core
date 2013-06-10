@@ -50,7 +50,8 @@
          proto_version_num/1,
          action_name/1,
          action_request_num/1,
-         diversification_type/1
+         diversification_type/1,
+         diversification_type_num/1
         ]).
 
 
@@ -171,6 +172,13 @@ announce(Contact, InfoHash, Token, BTPort) ->
         Values -> decode_reply_body(announce, Values)
     end.
 
+
+%% ==================================================================
+
+%% @private
+forward_reply(SocketPid, Address, Reply) ->
+    gen_server:cast(SocketPid, {forward_reply, Address, Reply}).
+
 %% ==================================================================
 
 init([DHTPort, ExternalIP]) ->
@@ -216,6 +224,17 @@ handle_call(get_node_port, _From, State) ->
     {ok, {_, Port}} = inet:sockname(Socket),
     {reply, Port, State}.
 
+handle_cast({forward_reply, {IP, Port}, EncodedReply}, State) ->
+    #state{socket=Socket} = State,
+    case gen_udp:send(Socket, IP, Port, EncodedReply) of
+        ok ->
+            {noreply, State};
+        {error, einval} ->
+            {noreply, State};
+        {error, eagain} ->
+            {noreply, State}
+    end;
+
 handle_cast(not_implemented, State) ->
     {noreply, State}.
 
@@ -232,9 +251,11 @@ handle_info({timeout, _, IP, Port, ID}, State) ->
     end,
     {noreply, NewState};
 
-handle_info({udp, _Socket, IP, Port, Packet}, State) ->
+handle_info({udp, _Socket, IP, Port, Packet},
+            #state{instance_id=MyInstanceId} = State) ->
     io:format(user, "Receiving a packet from ~p:~p~n", [IP, Port]),
     io:format(user, "~p~n", [Packet]),
+    SocketPid = self(),
     NewState =
     case packet_type(Packet) of
         request ->
@@ -243,7 +264,10 @@ handle_info({udp, _Socket, IP, Port, Packet}, State) ->
                         ok
                 end),
             spawn_link(fun() ->
-                        handle_request_packet(Packet),
+                        handle_request_packet(Packet,
+                                              MyInstanceId,
+                                              {IP, Port},
+                                              SocketPid),
                         ok
                 end),
             State;
@@ -263,7 +287,7 @@ code_change(_, _, State) ->
 
 %% ==================================================================
 
-handle_request_packet(Packet) ->
+handle_request_packet(Packet, MyInstanceId, Address, SocketPid) ->
     {RequestHeader, Body} = decode_request_header(Packet),
     #request_header{
         action=ActionNum,
@@ -276,8 +300,34 @@ handle_request_packet(Packet) ->
     Action = action_name(ActionNum),
     {RequestBody, _} = decode_request_body(Action, Version, Body),
     io:format("Decoded body: ~ts~n", [pretty(RequestBody)]),
-
-    ok.
+    Result = 
+    case Action of
+        ping ->
+            NetworkCoordinates = [#position{type=none}],
+            Args = #ping_reply{network_coordinates=NetworkCoordinates},
+            {ok, Args};
+        _ ->
+            {error, unknown_action}
+    end,
+    case Result of
+        {ok, ReplyArgs} ->
+        PacketVersion = min(proto_version_num(supported), Version),
+        ReplyHeader = #reply_header{
+            action=ActionNum,
+            connection_id=ConnId,
+            transaction_id=TranId,
+            protocol_version=PacketVersion,
+            vendor_id=0,
+            network_id=0,
+            instance_id=MyInstanceId},
+        Reply = [encode_reply_header(ReplyHeader)
+                |encode_reply_body(Action, PacketVersion, ReplyArgs)],
+        forward_reply(SocketPid, Address, Reply),
+        ok;
+    {error, Reason} ->
+        lager:debug("Error ~p.", [Reason]),
+        ok
+    end.
 
 handle_reply_packet(Packet, IP, Port, State=#state{sent=Sent}) ->
     try decode_reply_header(Packet) of
@@ -319,8 +369,8 @@ do_send_query(Action, Args, #contact{version=Version,
            next_transaction_id=TranId,
            instance_id=InstanceId} = State,
     ConnId = unique_connection_id(IP, Port, Sent),
-%   min(proto_version_num(supported), Version),
     ActionNum = action_request_num(Action),
+    PacketVersion = min(proto_version_num(supported), Version),
     [erlang:error({bad_action, Action, ActionNum})
      || not is_integer(ActionNum)],
     RequestHeader = #request_header{
@@ -330,11 +380,11 @@ do_send_query(Action, Args, #contact{version=Version,
         instance_id=InstanceId,
         local_protocol_version=proto_version_num(supported),
         node_address=NodeAddress,
-        protocol_version=Version,
+        protocol_version=PacketVersion,
         time=milliseconds_since_epoch()
     },
     Request = [encode_request_header(RequestHeader)
-              |encode_request_body(Action, Version, Args)],
+              |encode_request_body(Action, PacketVersion, Args)],
 
     case gen_udp:send(Socket, IP, Port, Request) of
         ok ->
@@ -432,6 +482,9 @@ decode_boolean(<<1, T/binary>>) -> {true, T}.
 decode_sized_binary(<<Len, H:Len/binary, T/binary>>) ->
     {H, T}.
 
+decode_sized_bytes(<<Len, H:Len/binary, T/binary>>) ->
+    {binary_to_list(H), T}.
+
 decode_sized_binary2(<<Len:16/big-integer, H:Len/binary, T/binary>>) ->
     {H, T}.
 
@@ -465,18 +518,36 @@ decode_contacts_n(Bin, Left, Acc) ->
     decode_contacts_n(Bin1, Left-1, [Contact|Acc]).
 
 %% see DHTTransportUDPImpl:sendStore
-decode_keys(Bin, Version) ->
-    {ValueCount, Bin1} = decode_short(Bin),
-    decode_values_n(Bin1, Version, ValueCount, []).
+-spec decode_keys(Bin) -> Keys when
+    Bin :: binary(),
+    Keys :: list(binary()).
+decode_keys(Bin) ->
+    %% MAX_KEYS_PER_PACKET = 255;
+    %% 1 byte DHTUDPPacket.PACKET_MAX_BYTES 
+    {KeyCount, Bin1} = decode_byte(Bin),
+    decode_keys_n(Bin1, KeyCount, []).
 
-decode_values_n(Bin, _Version, 0, Acc) ->
+decode_keys_n(Bin, 0, Acc) ->
     {lists:reverse(Acc), Bin};
-decode_values_n(Bin, Version, Left, Acc) ->
-    {Value, Bin1} = decode_value(Bin, Version),
-    decode_values_n(Bin1, Version, Left-1, [Value|Acc]).
+decode_keys_n(Bin, Left, Acc) ->
+    {Key, Bin1} = decode_key(Bin),
+    decode_keys_n(Bin1, Left-1, [Key|Acc]).
 
+decode_key(Bin) ->
+    decode_sized_binary(Bin).
 
 %% transport/udp/impl/DHTUDPUtils.deserialiseTransportValues
+decode_value_groups(Bin, Version) ->
+    {ValueGroupCount, Bin1} = decode_byte(Bin),
+    decode_value_groups_n(Bin1, Version, ValueGroupCount, []).
+
+decode_value_groups_n(Bin, _Version, 0, Acc) ->
+    {lists:reverse(Acc), Bin};
+decode_value_groups_n(Bin, Version, Left, Acc) ->
+    {Value, Bin1} = decode_value_group(Bin, Version),
+    decode_value_groups_n(Bin1, Version, Left-1, [Value|Acc]).
+
+
 decode_value_group(Bin, Version) ->
     {ValueCount, Bin1} = decode_short(Bin),
     decode_values_n(Bin1, Version, ValueCount, []).
@@ -538,7 +609,7 @@ encode_network_position(#position{type=none}) ->
     <<0, 0>>;
 encode_network_position(#position{type=vivaldi_v1,
                                   x=X, y=Y, z=Z, error=E}) ->
-    [<<1, 16>>, [encode_float(Value) || Velue <- [X,Y,Z,E]]].
+    [<<1, 16>>, [encode_float(Value) || Value <- [X,Y,Z,E]]].
 
 
 %% First byte indicates length of the IP address (4 for IPv4, 16 for IPv6);
@@ -549,7 +620,8 @@ encode_address({{A,B,C,D}, Port}) ->
 
 encode_contacts(Contacts) -> 
     ContactsCount = length(Contacts),
-    [encode_short(ContactsCount), [encode_contact(Rec) || Rec <- Contacts]].
+    [encode_short(ContactsCount),
+     [encode_contact(Rec) || Rec <- Contacts]].
 
 %% First byte indicates contact type, which must be UDP (1);
 %% second byte indicates the contact's protocol version;
@@ -557,11 +629,22 @@ encode_contacts(Contacts) ->
 encode_contact(#contact{version=ProtoVer, address=Address}) ->
     <<1, ProtoVer, (encode_address(Address))/binary>>.
 
+encode_keys(Keys) -> 
+    KeyCount = length(Keys),
+    [encode_byte(KeyCount),
+     [encode_key(Key) || Key <- Keys]].
+
+encode_key(Key) ->
+    encode_sized_binary(Key).
+
 encode_sized_binary(ID) when is_binary(ID) ->
     [encode_byte(byte_size(ID)), ID].
 
 encode_sized_binary2(ID) when is_binary(ID) ->
     [encode_short(byte_size(ID)), ID].
+
+encode_sized_bytes(Bytes) ->
+    encode_sized_binary(list_to_binary(Bytes)).
 
 encode_diversification_type(Type) ->
     encode_byte(diversification_type_num(Type)).
@@ -607,9 +690,19 @@ encode_reply_header(#reply_header{
      encode_int(InstanceId)
     ].
 
+%% see DHTUDPUtils.deserialiseTransportValues
 encode_value_group(Values, Version) ->
     ValueCount = length(Values),
-    [encode_short(ValueCount), [encode_value(Rec, Version) || Rec <- Values]].
+    [encode_short(ValueCount),
+     [encode_value(Rec, Version) || Rec <- Values]].
+
+%% see DHTUDPUtils.deserialiseTransportValuesArray
+encode_value_groups(ValueGroups, Version) ->
+    ValueGroupCount = length(ValueGroups),
+    %% MAX_KEYS_PER_PACKET = 255
+    [encode_byte(ValueGroupCount),
+     [encode_value_group(Group, Version) || Group <- ValueGroups]].
+
 
 %% see decode_value/2
 encode_value(ValueRec=#transport_value{}, PacketVersion) ->
@@ -655,7 +748,20 @@ encode_request_body(find_value, Version, #find_value_request{
                 max_values=MaxValues}) ->
     [encode_sized_binary(ID), encode_byte(Flags), encode_byte(MaxValues)];
 encode_request_body(ping, Version, _) ->
-    [].
+    [];
+encode_request_body(store, Version, #store_request{
+                spoof_id=SpoofId,
+                keys=Keys,
+                value_groups=ValueGroups
+                }) ->
+    [
+    case higher_or_equal_version(Version, anti_spoof) of
+        true -> encode_int(SpoofId);
+        false -> encode_none()
+    end,
+    encode_keys(Keys),
+    encode_value_groups(ValueGroups, Version)
+    ].
 
 encode_reply_body(ping, Version, #ping_reply{
                 network_coordinates=NetworkCoordinates}) ->
@@ -722,7 +828,9 @@ encode_reply_body(find_value, Version, #find_value_reply{
             end
             ]
     end
-    ].
+    ];
+encode_reply_body(store, _Version, #store_reply{diversifications=Divs}) ->
+    encode_sized_bytes(Divs).
 
 
 decode_request_body(ping, Version, Bin) ->
@@ -745,7 +853,21 @@ decode_request_body(find_node, Version, Bin) ->
         dht_size=DhtSize
     },
     {Request, Bin3};
-decode_request_body(Action, Version, Bin) ->
+decode_request_body(store, Version, Bin) ->
+    {SpoofId, Bin1} =
+    case higher_or_equal_version(Version, anti_spoof) of
+        true -> decode_int(Bin);
+        false -> decode_none(Bin)
+    end,
+    {Keys, Bin2} = decode_keys(Bin1),
+    {ValueGroups, Bin3} = decode_value_groups(Bin2, Version),
+    Request = #store_request{
+        spoof_id=SpoofId,
+        keys=Keys,
+        value_groups=ValueGroups
+    },
+    {Request, Bin3};
+decode_request_body(_Action, _Version, Bin) ->
     {unknown, Bin}.
 
 
@@ -846,13 +968,19 @@ decode_reply_body(ping, Version, Bin) ->
     Reply = #ping_reply{
             network_coordinates=NetworkCoordinates
             },
+    {Reply, Bin1};
+decode_reply_body(store, _Version, Bin) ->
+    {Divs, Bin1} = decode_sized_bytes(Bin),
+    Reply = #store_reply{
+            diversifications=Divs
+            },
     {Reply, Bin1}.
 
 decode_error(Version, Bin) ->
     {'TODO', Bin}.
 
 decode_request_header(Bin) ->
-    {ConnId,  Bin1} = decode_long(Bin),
+    {ConnId,  Bin1} = decode_connection_id(Bin),
     {Action,  Bin2} = decode_int(Bin1),
     {TranId,  Bin3} = decode_int(Bin2),
     {Version, Bin4} = decode_byte(Bin3),
