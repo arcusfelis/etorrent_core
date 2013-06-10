@@ -269,6 +269,10 @@ diversification_type(1) -> none;
 diversification_type(2) -> frequency;
 diversification_type(3) -> size.
 
+diversification_type_num(none)      -> 1;
+diversification_type_num(frequency) -> 2;
+diversification_type_num(size)      -> 3.
+
 %% Crypto
 %% ======
 

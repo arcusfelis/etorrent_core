@@ -126,7 +126,7 @@
 }).
 
 -record(ping_reply, {
-    network_coordinates :: position()
+    network_coordinates :: [position()]
 }).
 
 -record(find_value_request, {

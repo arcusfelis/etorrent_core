@@ -464,6 +464,17 @@ decode_contacts_n(Bin, Left, Acc) ->
     {Contact, Bin1} = decode_contact(Bin),
     decode_contacts_n(Bin1, Left-1, [Contact|Acc]).
 
+%% see DHTTransportUDPImpl:sendStore
+decode_keys(Bin, Version) ->
+    {ValueCount, Bin1} = decode_short(Bin),
+    decode_values_n(Bin1, Version, ValueCount, []).
+
+decode_values_n(Bin, _Version, 0, Acc) ->
+    {lists:reverse(Acc), Bin};
+decode_values_n(Bin, Version, Left, Acc) ->
+    {Value, Bin1} = decode_value(Bin, Version),
+    decode_values_n(Bin1, Version, Left-1, [Value|Acc]).
+
 
 %% transport/udp/impl/DHTUDPUtils.deserialiseTransportValues
 decode_value_group(Bin, Version) ->
@@ -514,9 +525,21 @@ encode_short(X) when is_integer(X) -> <<X:16/big-integer>>.
 encode_int(X)   when is_integer(X) -> <<X:32/big-integer>>.
 encode_long(X)  when is_integer(X) -> <<X:64/big-integer>>.
 encode_none() -> [].
+encode_float(X) -> <<X:32/big-float>>.
 
 encode_boolean(true)  -> <<1>>;
 encode_boolean(false) -> <<0>>.
+
+encode_network_coordinates(NetworkCoordinates) ->
+    [encode_byte(length(NetworkCoordinates)),
+     [encode_network_position(Pos) || Pos <- NetworkCoordinates]].
+
+encode_network_position(#position{type=none}) ->
+    <<0, 0>>;
+encode_network_position(#position{type=vivaldi_v1,
+                                  x=X, y=Y, z=Z, error=E}) ->
+    [<<1, 16>>, [encode_float(Value) || Velue <- [X,Y,Z,E]]].
+
 
 %% First byte indicates length of the IP address (4 for IPv4, 16 for IPv6);
 %% next comes the address in network byte order;
@@ -539,6 +562,9 @@ encode_sized_binary(ID) when is_binary(ID) ->
 
 encode_sized_binary2(ID) when is_binary(ID) ->
     [encode_short(byte_size(ID)), ID].
+
+encode_diversification_type(Type) ->
+    encode_byte(diversification_type_num(Type)).
 
 encode_request_header(#request_header{
         connection_id=ConnId,
@@ -631,10 +657,72 @@ encode_request_body(find_value, Version, #find_value_request{
 encode_request_body(ping, Version, _) ->
     [].
 
-encode_reply_body(find_value, Version, _) ->
-    [];
-encode_reply_body(ping, Version, _) ->
-    [].
+encode_reply_body(ping, Version, #ping_reply{
+                network_coordinates=NetworkCoordinates}) ->
+    case higher_or_equal_version(Version, vivaldi) of
+        true  -> encode_network_coordinates(NetworkCoordinates);
+        false -> encode_none()
+    end;
+encode_reply_body(find_node, Version, #find_node_reply{
+                spoof_id=SpoofId,
+                node_type=NodeType,
+                dht_size=DhtSize,
+                network_coordinates=NetworkCoordinates,
+                contacts=Contacts}) ->
+    [
+    case higher_or_equal_version(Version, anti_spoof) of
+        true -> encode_int(SpoofId);
+        false -> encode_none()
+    end,
+    case higher_or_equal_version(Version, xfer_status) of
+        true -> encode_int(NodeType);
+        false -> encode_none()
+    end,
+    case higher_or_equal_version(Version, size_estimate) of
+        true -> encode_int(DhtSize);
+        false -> encode_none()
+    end,
+    %% TODO: encode byte() here in v51.
+    case higher_or_equal_version(Version, vivaldi) of
+        true  -> encode_network_coordinates(NetworkCoordinates);
+        false -> encode_none()
+    end,
+    encode_contacts(Contacts)
+    ];
+encode_reply_body(find_value, Version, #find_value_reply{
+                has_continuation=HasContinuation,
+                has_values=HasValues,
+                diversification_type=DivType,
+                values=Values,
+                contacts=Contacts,
+                network_coordinates=NetworkCoordinates
+                }) ->
+    [
+    case higher_or_equal_version(Version, div_and_cont) of
+        true -> encode_boolean(HasContinuation);
+        flase -> encode_none()
+    end,
+    decode_boolean(HasValues),
+    case HasValues of
+        true ->
+            %% Encode values.
+            [
+            case higher_or_equal_version(Version, div_and_cont) of
+                 true -> encode_diversification_type(DivType);
+                false -> encode_none()
+            end,
+            encode_value_group(Values, Version)
+            ];
+        false ->
+            [
+            encode_contacts(Contacts),
+            case higher_or_equal_version(Version, vivaldi) of
+                true -> encode_network_coordinates(NetworkCoordinates);
+                false -> encode_none()
+            end
+            ]
+    end
+    ].
 
 
 decode_request_body(ping, Version, Bin) ->
