@@ -10,7 +10,8 @@
          lookup_server/1,
          await_server/1]).
 
--export([debug_info/1]).
+-export([debug_info/1,
+         stored_chunks/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -59,6 +60,9 @@ await_server(TorrentID) ->
 
 debug_info(TorrentID) ->
     gen_server:call(await_server(TorrentID), debug_info).
+
+stored_chunks(TorrentID) ->
+    gen_server:call(await_server(TorrentID), stored_chunks).
 
 
 %% @doc
@@ -114,12 +118,17 @@ handle_call({chunk, requests}, _, State) ->
     Reply = [{Pid, Chunk} || {Chunk, Pids} <- AllReqs, Pid <- Pids],
     {reply, Reply, State};
 
+handle_call(stored_chunks, _, State) ->
+    #state{stored=Stored} = State,
+    Reply = gb_sets:to_list(Stored),
+    {reply, Reply, State};
+
 handle_call(debug_info, _, State) ->
     #state{assigned=Assigned, fetched=Fetched, stored=Stored,
            pending=Pending} = State,
     Reply = [{assigned_count, gb_trees:size(Assigned)},
              {fetched_count, gb_trees:size(Fetched)},
-             {stored_count, gb_trees:size(Stored)},
+             {stored_count, gb_sets:size(Stored)},
              {pending_pid, Pending}],
     {reply, Reply, State}.
 
@@ -152,6 +161,10 @@ handle_info({chunk, {dropped, Index, Offset, Length, Pid}}, State) ->
     Isassigned = is_assigned(Chunk, Assigned),
     [lager:error("ASSERT: an error in logic.") || Isfetched, Isassigned],
     NewState = if
+        Isstored, Wasfetched ->
+            %% This stored chunk was fetched by this peer.
+            NewFetched = del_fetched(Chunk, Pid, Fetched),
+            State#state{fetched=NewFetched};
         Isstored ->
             State;
         Isfetched, Wasfetched ->

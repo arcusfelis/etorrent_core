@@ -45,7 +45,8 @@
     DN :: string() | undefined,
     TR :: string().
 parse_url(Url) ->
-    {Scheme, _Netloc, _Path, Query, _Fragment} = ?URL_PARSER:urlsplit(Url),
+%   {Scheme, _Netloc, _Path, Query, _Fragment} = ?URL_PARSER:urlsplit(Url),
+    {Scheme, _UserInfo, _Host, _Port, _Path, Query} = http_uri:parse(Url),
     case Scheme of
         "magnet" ->
             %% Get a parameter proplist. Keys and values are strings.
@@ -67,14 +68,14 @@ build_url(XT, DN, TRs) when is_integer(XT), is_list(TRs) ->
 
 encode_description(undefined) -> <<>>;
 encode_description(DN) when is_binary(DN) ->
-    QDN = iolist_to_binary(mochiweb_util:quote_plus(DN)),
+    QDN = iolist_to_binary(quote_param(DN)),
     <<"&dn=", QDN/binary>>.
 
 encode_trackers(TRs) ->
     << <<(encode_tracker(TR))/binary>> || TR <- TRs>>.
 
 encode_tracker(TR) ->
-    QTR = iolist_to_binary(mochiweb_util:quote_plus(TR)),
+    QTR = iolist_to_binary(quote_param(TR)),
     <<"&tr=", QTR/binary>>.
 
 
@@ -212,3 +213,7 @@ parse_url_test_() ->
 integer_info_hash_to_literal(IntIH) when is_integer(IntIH) ->
     iolist_to_binary(io_lib:format("~40.16.0B", [IntIH])).
 
+
+quote_param(X) ->
+    mochiweb_util:quote_plus(X).
+    % http_uri:encode/1

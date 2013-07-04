@@ -500,7 +500,8 @@ activate_next_state(S=#state{id=Id, parent_pid=Sup, next_state=NextState}) ->
     lager:info("Activate next state ~p for #~p.", [NextState, Id]),
     case NextState of
         paused ->
-            ok = etorrent_torrent:statechange(Id, [paused]),
+            %% TODO: Should it be progress mode or something else?
+            ok = etorrent_torrent:statechange(Id, [paused, {set_mode, progress}]),
             %% Reset a parent supervisor to a default state.
             %% It is required, if the process was restarted.
             ok = etorrent_torrent_sup:pause(Sup),
@@ -660,7 +661,11 @@ handle_event({switch_mode, NewMode}, SN, S=#state{mode=OldMode}) ->
          ok;
 
     'endgame' ->
-        etorrent_torrent_sup:start_endgame(Sup, TorrentID)
+        case etorrent_torrent_sup:start_endgame(Sup, TorrentID) of
+            {ok, _Pid} -> ok;
+            {error, {already_started, _Pid}} -> ok;
+            {error, Reason} -> error({endgame_failed, Reason})
+        end
     end,
     ok = etorrent_torrent:statechange(TorrentID, [{set_mode, NewMode}]),
     etorrent_download:switch_mode(TorrentID, OldMode, NewMode),
