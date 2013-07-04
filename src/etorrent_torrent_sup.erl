@@ -104,6 +104,10 @@ start_scarcity(Pid, TorrentID, Torrent) ->
 
 
 stop_networking(Pid) ->
+    %% Do not allow new connections from trackers
+    %% (use peer_mgr or peer_acceptor for to block new connections).
+    %% Stop trackers after peers.
+    %% Stop pending and scarcity after them all.
     supervisor:terminate_child(Pid, tracker_communication),
     supervisor:delete_child(Pid, tracker_communication),
     supervisor:terminate_child(Pid, dht_tracker),
@@ -112,18 +116,21 @@ stop_networking(Pid) ->
     supervisor:delete_child(Pid, azdht_tracker),
     supervisor:terminate_child(Pid, peer_pool_sup),
     supervisor:delete_child(Pid, peer_pool_sup),
+    supervisor:terminate_child(Pid, tracker_communication),
+    supervisor:delete_child(Pid, tracker_communication),
     ok.
 
 pause(Pid) ->
     stop_networking(Pid),
+    %% control processes
     supervisor:terminate_child(Pid, chunk_mgr),
     supervisor:delete_child(Pid, chunk_mgr),
     supervisor:terminate_child(Pid, endgame),
     supervisor:delete_child(Pid, endgame),
-    supervisor:terminate_child(Pid, scarcity_mgr),
-    supervisor:delete_child(Pid, scarcity_mgr),
     supervisor:terminate_child(Pid, pending),
     supervisor:delete_child(Pid, pending),
+    supervisor:terminate_child(Pid, scarcity_mgr),
+    supervisor:delete_child(Pid, scarcity_mgr),
     %% io_sup
     supervisor:terminate_child(Pid, fs_pool),
     supervisor:delete_child(Pid, fs_pool),

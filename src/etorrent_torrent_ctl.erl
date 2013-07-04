@@ -511,9 +511,10 @@ activate_next_state(S=#state{id=Id, parent_pid=Sup, next_state=NextState}) ->
         started ->
             ok = etorrent_torrent:statechange(Id, [continue]),
             S1 = start_io(S),
+            S2 = start_control(S1),
             %% Networking will use the `valid' field.
-            S2 = start_networking(S1),
-            {next_state, started, S2};
+            S3 = start_networking(S2),
+            {next_state, started, S3};
         _ when NextState == checking; NextState == waiting ->
             %% This is a state to apply after checking.
             NewNextState = case etorrent_torrent:is_paused(Id) of
@@ -884,8 +885,7 @@ apply_options(S=#state{options=Options, peer_id=LocalPeerId,
             next_state=NewNextState}.
 
 %% Read information and calculate a set of metrics.
-apply_fast_resume(S=#state{id=Id, torrent=Torrent, hashes=Hashes,
-                           peer_id=LocalPeerId, mode=Mode, options=Options,
+apply_fast_resume(S=#state{id=Id, hashes=Hashes, peer_id=LocalPeerId, 
                            registration_options=RegOpts},
              FastResumePL) ->
     ValidPieces = form_valid_pieceset(Hashes, FastResumePL),
@@ -976,8 +976,6 @@ start_io(S=#state{id=Id, torrent=Torrent, parent_pid=Sup,
                   is_allocated=IsAllocated}) ->
     lager:info("Start IO sub-system for #~p.", [Id]),
     etorrent_torrent_sup:start_io_sup(Sup, Id, Torrent),
-    etorrent_torrent_sup:start_pending(Sup, Id),
-    etorrent_torrent_sup:start_scarcity(Sup, Id, Torrent),
     case IsAllocated of
         false ->
             etorrent_io:allocate(Id),
@@ -987,12 +985,11 @@ start_io(S=#state{id=Id, torrent=Torrent, parent_pid=Sup,
     end.
 
 
-%% Run this function only when IO-subsystem is active.
-start_networking(S=#state{id=Id, torrent=Torrent, valid=ValidPieces, wishes=Wishes,
-                          unwanted=UnwantedPieces, parent_pid=Sup}) ->
-    lager:info("Start IO networking-system for #~p.", [Id]),
+start_control(S=#state{id=Id, torrent=Torrent, valid=ValidPieces, wishes=Wishes,
+                       unwanted=UnwantedPieces, parent_pid=Sup}) ->
     Masks = wishes_to_masks(Wishes),
-
+    etorrent_torrent_sup:start_pending(Sup, Id),
+    etorrent_torrent_sup:start_scarcity(Sup, Id, Torrent),
     %% Start the progress manager
     {ok, ProgressPid} =
     case etorrent_torrent_sup:start_progress(
@@ -1010,6 +1007,12 @@ start_networking(S=#state{id=Id, torrent=Torrent, valid=ValidPieces, wishes=Wish
             lager:debug("Progress manager is already started for ~p.", [Id]),
             {ok, Pid}
     end,
+
+    S#state{ progress=ProgressPid }.
+
+%% Run this function only when IO-subsystem is active.
+start_networking(S=#state{id=Id}) ->
+    lager:info("Start IO networking-system for #~p.", [Id]),
 
     %% Update the tracking map. This torrent has been started.
     %% Altering this state marks the point where we will accept
@@ -1038,7 +1041,6 @@ start_networking(S=#state{id=Id, torrent=Torrent, valid=ValidPieces, wishes=Wish
     {ok, Timer} = timer:send_interval(10000, check_completed),
 
     S#state{tracker_pid = TrackerPid,
-               progress = ProgressPid,
                interval = Timer }.
 
 
