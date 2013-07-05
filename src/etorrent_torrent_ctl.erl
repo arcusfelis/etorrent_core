@@ -872,13 +872,14 @@ apply_options(S=#state{options=Options, peer_id=LocalPeerId,
     PeerId = proplists:get_value(peer_id, Options),
     %% Rewritten download_dir or `undefined'.
     Dir    = proplists:get_value(directory, Options),
-    NewNextState = case proplists:get_bool(paused, Options) of
-                   true  -> paused;
-                   false ->
-                    case proplists:get_bool(check, Options) of
-                        true -> waiting;
-                        false -> NextState
-                    end
+    Paused  = proplists:get_bool(paused, Options),
+    Check   = proplists:get_bool(check, Options),
+    NoCheck = proplists:get_bool(no_check, Options),
+    NewNextState = case {Paused, Check, NoCheck} of
+                        {true,   _,     _      } -> paused;
+                        {false,  true,  false  } -> waiting;
+                        {false,  false, true   } -> started;
+                        {false,  false, false  } -> NextState
                end,
     S#state{directory=Dir,
             peer_id=case PeerId of undefined -> LocalPeerId; _ -> PeerId end,
