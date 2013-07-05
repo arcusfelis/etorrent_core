@@ -867,7 +867,8 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %% --------------------------------------------------------------------
 
 apply_options(S=#state{options=Options, peer_id=LocalPeerId,
-                       next_state=NextState}) ->
+                       next_state=NextState, hashes=Hashes,
+                       valid=ValidPieces}) ->
     %% Rewritten peer id or `undefined'.
     PeerId = proplists:get_value(peer_id, Options),
     %% Rewritten download_dir or `undefined'.
@@ -880,10 +881,17 @@ apply_options(S=#state{options=Options, peer_id=LocalPeerId,
                         {false,  true,  false  } -> waiting;
                         {false,  false, true   } -> started;
                         {false,  false, false  } -> NextState
-               end,
+                   end,
+    Completed = proplists:get_bool(completed, Options),
+    Numpieces = num_hashes(Hashes),
+    NewValidPieces = case Completed of
+                          true -> etorrent_pieceset:full(Numpieces);
+                          false -> ValidPieces
+                     end,
     S#state{directory=Dir,
             peer_id=case PeerId of undefined -> LocalPeerId; _ -> PeerId end,
-            next_state=NewNextState}.
+            next_state=NewNextState,
+            valid=NewValidPieces}.
 
 %% Read information and calculate a set of metrics.
 apply_fast_resume(S=#state{id=Id, hashes=Hashes, peer_id=LocalPeerId, 
