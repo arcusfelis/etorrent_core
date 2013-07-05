@@ -18,7 +18,8 @@
          insert/3,
          from_list/3,
          in/3,
-         subtract/3]).
+         subtract/3,
+         to_string/1]).
 
 -record(chunkset, {
     piece_len :: pos_integer(),
@@ -413,3 +414,11 @@ subtract_test_() ->
     ].
 
 -endif.
+
+to_string(#chunkset{chunks=Chunks}) ->
+    chunks_to_string(Chunks).
+
+chunks_to_string(Chunks) ->
+    iolist_to_list([$<, string:join([io_lib:format("~p-~p", [S,E]) || {S,E} <- Chunks], ", "), $>]).
+
+iolist_to_list(X) -> binary_to_list(iolist_to_binary(X)).

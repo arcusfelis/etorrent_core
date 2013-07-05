@@ -91,7 +91,11 @@
          code_change/3]).
 
 %% Private 
--export([stored_chunks/1]).
+-export([stored_chunks/1,
+         show_stored_chunks/2,
+         assigned_chunks/1,
+         show_assigned_chunks/2,
+         bad_pieces/1]).
 
 
 -type pieceset()   :: etorrent_pieceset:t().
@@ -117,6 +121,7 @@
     torrent_id  :: pos_integer(),
     torrent_pid :: pid(),
     chunk_size  :: pos_integer(),
+    bad_pieces = [] :: {piece_index(), erlang:timestamp()},
     %% Piece state sets
     pieces_valid      :: pieceset(),
     pieces_unassigned :: pieceset(),
@@ -374,6 +379,36 @@ stored_chunks(TorrentID) ->
     {ok, Chunks} = gen_server:call(ChunkSrv, stored_chunks),
     Chunks.
 
+%% @doc Show NOT YET stored chunks.
+%% If empty, then the whole piece is stored.
+show_stored_chunks(TorrentID, PieceId) ->
+    ChunkSets = stored_chunks(TorrentID),
+    case array:get(PieceId, ChunkSets) of
+        undefined -> undefined;
+        ChunkSet -> etorrent_chunkset:to_string(ChunkSet)
+    end.
+
+assigned_chunks(TorrentID) ->
+    ChunkSrv = lookup_server(TorrentID),
+    {ok, Chunks} = gen_server:call(ChunkSrv, assigned_chunks),
+    Chunks.
+
+
+%% @doc Show NOT YET assigned chunks.
+%% If empty, then the whole piece is assigned.
+show_assigned_chunks(TorrentID, PieceId) ->
+    ChunkSets = assigned_chunks(TorrentID),
+    case array:get(PieceId, ChunkSets) of
+        undefined -> undefined;
+        ChunkSet -> etorrent_chunkset:to_string(ChunkSet)
+    end.
+
+%% @doc Show hash-checking errors.
+bad_pieces(TorrentID) ->
+    ChunkSrv = lookup_server(TorrentID),
+    {ok, BadPieces} = gen_server:call(ChunkSrv, bad_pieces),
+    BadPieces.
+
 
 %% @private
 init(Serverargs) ->
@@ -588,6 +623,12 @@ handle_call({state_members, Piecestate}, _, State) ->
     end,
     {reply, Stateset, State};
 
+handle_call(bad_pieces, _, State=#state{bad_pieces=BadPieces}) ->
+    {reply, {ok, BadPieces}, State};
+
+handle_call(assigned_chunks, _, State=#state{chunks_assigned=AssignedChunks}) ->
+    {reply, {ok, AssignedChunks}, State};
+
 handle_call(stored_chunks, _, State=#state{chunks_stored=StoredChunks}) ->
     {reply, {ok, StoredChunks}, State}.
 
@@ -635,6 +676,8 @@ handle_cast(_, State) ->
 %% @private
 handle_info({piece, {valid, Index}}, State) ->
     #state{
+        chunks_stored=ChunksStored,
+        chunks_assigned=ChunksAssigned,
         pieces_stored=Stored,
         pieces_valid=Valid} = State,
     IsStored = etorrent_pieceset:is_member(Index, Stored),
@@ -648,9 +691,13 @@ handle_info({piece, {valid, Index}}, State) ->
         valid -> {noreply, State};
         not_stored -> {noreply, State};
         stored ->
+            NewChunksStored   = array:reset(Index, ChunksStored),
+            NewChunksAssigned = array:reset(Index, ChunksAssigned),
             NewStored = etorrent_pieceset:delete(Index, Stored),
             NewValid = etorrent_pieceset:insert(Index, Valid),
             NewState = State#state{
+                chunks_stored=NewChunksStored,
+                chunks_assigned=NewChunksAssigned,
                 pieces_stored=NewStored,
                 pieces_valid=NewValid},
             {noreply, NewState}
@@ -663,6 +710,7 @@ handle_info({piece, {invalid, Index}}, State) ->
     %% _ => invalid
     %% Chunks must be downloaded again.
     #state{
+        bad_pieces=BadPieces,
         pieces_stored=Stored,
         pieces_begun=Begun,
         pieces_valid=Valid,
@@ -682,6 +730,7 @@ handle_info({piece, {invalid, Index}}, State) ->
     NewBegun      = etorrent_pieceset:insert(Index, Begun),
 
     NewState = State#state{
+        bad_pieces=[{Index, os:timestamp()}|BadPieces],
         pieces_begun=NewBegun,
         pieces_stored=NewStored,
         pieces_valid=NewValid,

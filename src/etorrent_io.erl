@@ -392,13 +392,14 @@ schedule_io_operation(Directory, RelPath) ->
 %% This reads the piece into memory before it is hashed.
 %% If the piece is valid the size of the piece is returned.
 %% @end
--spec check_piece(torrent_id(), integer(),
-                  <<_:160>>) -> {ok, integer()} | wrong_hash.
+-spec check_piece(torrent_id(), integer(), <<_:160>>) ->
+    {ok, ByteSize} | {wrong_hash, ByteSize} when
+    ByteSize :: non_neg_integer().
 check_piece(TorrentID, Pieceindex, Piecehash) ->
     {ok, Piecebin} = etorrent_io:read_piece(TorrentID, Pieceindex),
     case etorrent_utils:sha(Piecebin) of
         Piecehash  -> {ok, byte_size(Piecebin)};
-        _OtherHash -> wrong_hash
+        _OtherHash -> {wrong_hash, byte_size(Piecebin)}
     end.
 
 %% ----------------------------------------------------------------------

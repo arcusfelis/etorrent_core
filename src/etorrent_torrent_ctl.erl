@@ -60,6 +60,9 @@
 -export([unskip_file/2,
          skip_file/2]).
 
+%% debugging
+-export([show_valid/1]).
+
 
 -type peer_id() :: etorrent_types:peer_id().
 -type bcode() :: etorrent_types:bcode().
@@ -306,6 +309,12 @@ skip_file(TorrentID, FileID) ->
 unskip_file(TorrentID, FileID) ->
     CtlSrv = lookup_server(TorrentID),
     gen_fsm:sync_send_all_state_event(CtlSrv, {unskip_file, FileID}).
+
+
+show_valid(TorrentID) ->
+    CtlSrv = lookup_server(TorrentID),
+    {ok, Valid} = gen_fsm:sync_send_all_state_event(CtlSrv, valid_pieces),
+    etorrent_pieceset:to_string(Valid).
 
 
 %% @private
@@ -770,6 +779,7 @@ handle_sync_event({unskip_file, FileID}, _From, SN, SD) ->
     end,
     {reply, ok, SN, SD1};
 
+
 handle_sync_event({set_wishes, NewWishes}, _From, SN, 
     SD=#state{id=Id, wishes=OldWishes, valid=ValidPieces}) ->
     Wishes = validate_wishes(Id, NewWishes, OldWishes, ValidPieces),
@@ -805,19 +815,14 @@ handle_info({piece, {stored, Index}}, started, State) ->
     Piecehash = fetch_hash(Index, Hashes),
     case etorrent_io:check_piece(TorrentID, Index, Piecehash) of
         {ok, PieceSize} ->
+            notify_valid_piece(TorrentID, Index, PieceSize, ValidPieces, UnwantedPieces),
             Peers = etorrent_peer_control:lookup_peers(TorrentID),
-            StateChange = 
-            case etorrent_pieceset:is_member(Index, UnwantedPieces) of
-                true -> []; %% Already subtracted, when the piece was skipped.
-                false -> [{subtract_left, PieceSize}]
-            end,
-            ok = etorrent_torrent:statechange(TorrentID, 
-                [{subtract_left_or_skipped, PieceSize}|StateChange]),
             ok = etorrent_piecestate:valid(Index, Peers),
             ok = etorrent_piecestate:valid(Index, Progress),
             NewValidState = etorrent_pieceset:insert(Index, ValidPieces),
             {next_state, started, State#state { valid = NewValidState }};
-        wrong_hash ->
+        {wrong_hash, PieceSize} ->
+            notify_invalid_piece(TorrentID, Index, PieceSize, ValidPieces, UnwantedPieces),
             Peers = etorrent_peer_control:lookup_peers(TorrentID),
             ok = etorrent_piecestate:invalid(Index, Progress),
             ok = etorrent_piecestate:unassigned(Index, Peers),
@@ -837,16 +842,11 @@ handle_info({piece, {stored, Index}}, paused, State) ->
     Piecehash = fetch_hash(Index, Hashes),
     case etorrent_io:check_piece(TorrentID, Index, Piecehash) of
         {ok, PieceSize} ->
-            StateChange = 
-            case etorrent_pieceset:is_member(Index, UnwantedPieces) of
-                true -> []; %% Already subtracted, when the piece was skipped.
-                false -> [{subtract_left, PieceSize}]
-            end,
-            ok = etorrent_torrent:statechange(TorrentID, 
-                [{subtract_left_or_skipped, PieceSize}|StateChange]),
+            notify_valid_piece(TorrentID, Index, PieceSize, ValidPieces, UnwantedPieces),
             NewValidState = etorrent_pieceset:insert(Index, ValidPieces),
             {next_state, paused, State#state { valid = NewValidState }};
-        wrong_hash ->
+        {wrong_hash, PieceSize} ->
+            notify_invalid_piece(TorrentID, Index, PieceSize, ValidPieces, UnwantedPieces),
             {next_state, paused, State}
     end.
 
@@ -1098,7 +1098,7 @@ is_valid_piece(TorrentID, Index, Hashes) ->
     Hash = fetch_hash(Index, Hashes),
     case etorrent_io:check_piece(TorrentID, Index, Hash) of
         {ok, Size} -> {true, Size};
-        wrong_hash -> {false, 0}
+        {wrong_hash, _} -> {false, 0}
     end.
 
 
@@ -1219,3 +1219,35 @@ torrent_state_to_next_state(unknown)  -> waiting;
 torrent_state_to_next_state(waiting)  -> waiting;
 torrent_state_to_next_state(checking) -> checking;
 torrent_state_to_next_state(paused)   -> paused.
+
+
+notify_valid_piece(TorrentID, Index, PieceSize, ValidPieces, UnwantedPieces) ->
+    StateChange = 
+    case etorrent_pieceset:is_member(Index, UnwantedPieces) of
+        true -> []; %% Already subtracted, when the piece was skipped.
+        false -> [{subtract_left, PieceSize}]
+    end,
+    case etorrent_pieceset:is_member(Index, ValidPieces) of
+    true ->
+        lager:warning("Ignore store notification for the valid piece ~p.", [Index]),
+        ok;
+    false ->
+        ok = etorrent_torrent:statechange(TorrentID, 
+            [{subtract_left_or_skipped, PieceSize}|StateChange])
+    end.
+
+
+notify_invalid_piece(TorrentID, Index, PieceSize, ValidPieces, UnwantedPieces) ->
+    StateChange = 
+    case etorrent_pieceset:is_member(Index, UnwantedPieces) of
+        true -> []; %% Already subtracted, when the piece was skipped.
+        false -> [{subtract_left, -PieceSize}]
+    end,
+    case etorrent_pieceset:is_member(Index, ValidPieces) of
+    false ->
+        lager:warning("Ignore store notification for the invalid piece ~p.", [Index]),
+        ok;
+    true ->
+        ok = etorrent_torrent:statechange(TorrentID, 
+            [{subtract_left_or_skipped, -PieceSize}|StateChange])
+    end.
