@@ -1224,6 +1224,7 @@ is_progress_active(_) -> true.
 
 torrent_state_to_next_state(seeding)  -> started;
 torrent_state_to_next_state(leeching) -> started;
+torrent_state_to_next_state(partial)  -> started; %% partial seeding
 torrent_state_to_next_state(unknown)  -> waiting;
 torrent_state_to_next_state(waiting)  -> waiting;
 torrent_state_to_next_state(checking) -> checking;
