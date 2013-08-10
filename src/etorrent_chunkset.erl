@@ -33,7 +33,7 @@
 %% Create a set of chunks for a piece.
 %% @end
 -spec new(pos_integer(), pos_integer()) -> chunkset().
-new(PieceLen, ChunkLen) ->
+new(PieceLen, ChunkLen) when is_integer(PieceLen), is_integer(ChunkLen) ->
     #chunkset{
         piece_len=PieceLen,
         chunk_len=ChunkLen,
@@ -41,7 +41,7 @@ new(PieceLen, ChunkLen) ->
 
 
 %% @doc Create am empty copy of the chunkset.
-new(Prototype) ->
+new(Prototype=#chunkset{}) ->
     Prototype#chunkset{chunks=[]}.
 
 
@@ -61,7 +61,8 @@ proto_empty(#chunkset{piece_len=PieceLen, chunk_len=ChunkLen}) ->
         chunks=[]}.
 
 
-from_list(PieceLen, ChunkLen, Chunks) ->
+from_list(PieceLen, ChunkLen, Chunks)
+    when is_integer(PieceLen), is_integer(ChunkLen) ->
     #chunkset{
         piece_len=PieceLen,
         chunk_len=ChunkLen,
@@ -71,8 +72,7 @@ from_list(PieceLen, ChunkLen, Chunks) ->
 %% Get sum of the size of all chunks in the chunkset.
 %% @end
 -spec size(chunkset()) -> non_neg_integer().
-size(Chunkset) ->
-    #chunkset{chunks=Chunks} = Chunkset,
+size(#chunkset{chunks=Chunks}) ->
     Lengths = [1 + End - Start || {Start, End} <- Chunks],
     lists:sum(Lengths).
 
@@ -82,14 +82,13 @@ size(Chunkset) ->
 %% be shorter than the chunk length of the set.
 %% @end
 -spec min(chunkset()) -> {pos_integer(), pos_integer()}.
-min(Chunkset) ->
+min(Chunkset=#chunkset{}) ->
     case min_(Chunkset) of
         none  -> erlang:error(badarg);
         Other -> Other
     end.
 
-min_(Chunkset) ->
-    #chunkset{chunk_len=ChunkLen, chunks=Chunks} = Chunkset,
+min_(#chunkset{chunk_len=ChunkLen, chunks=Chunks}) ->
     case Chunks of
         [] ->
             none;
@@ -150,8 +149,8 @@ in(Offset, Size, Chunkset) ->
 
 %% @doc This operation run `delete/3' and return result and 
 %%      the list of the deleted values.
-subtract(Offset, Length, Chunkset) when Length > 0, Offset >= 0 ->
-    #chunkset{chunks=Chunks} = Chunkset,
+subtract(Offset, Length, Chunkset=#chunkset{chunks=Chunks})
+    when is_integer(Length), is_integer(Offset), Length > 0, Offset >= 0 ->
     {NewChunks, Deleted} = sub_(Offset, Offset + Length - 1, Chunks, [], []),
     {Chunkset#chunkset{chunks=NewChunks}, rev_deleted_(Deleted, [])}.
 
@@ -200,8 +199,7 @@ sub_(_CS, _CE, [], Res, Acc) ->
 
 %% @doc Check is a chunkset is empty
 %% @end
-is_empty(Chunkset) ->
-    #chunkset{chunks=Chunks} = Chunkset,
+is_empty(#chunkset{chunks=Chunks}) ->
     Chunks == [].
 
 
@@ -216,10 +214,9 @@ delete([{Offset, Length}|T], Chunkset) ->
 %% @doc
 %% 
 %% @end
-delete(Offset, Length, _Chunkset) when Length < 1; Offset < 0 ->
+delete(Offset, Length, _Chunkset=#chunkset{}) when Length < 1; Offset < 0 ->
     erlang:error(badarg);
-delete(Offset, Length, Chunkset) ->
-    #chunkset{chunks=Chunks} = Chunkset,
+delete(Offset, Length, Chunkset=#chunkset{chunks=Chunks}) ->
     NewChunks = delete_(Offset, Offset + Length - 1, Chunks),
     Chunkset#chunkset{chunks=NewChunks}.
 

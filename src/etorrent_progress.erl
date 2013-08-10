@@ -746,6 +746,9 @@ handle_info({chunk, {stored, Index, Offset, Length, _Pid}}, State) ->
         pieces_stored=Stored,
         chunks_stored=ChunksStored} = State,
 
+    case etorrent_pieceset:is_member(Index, Stored) of
+    true -> {noreply, State};
+    false ->
 
     %% Update the set of chunks in the piece that has been written to disk.
     Chunks = array:get(Index, ChunksStored),
@@ -784,7 +787,8 @@ handle_info({chunk, {stored, Index, Offset, Length, _Pid}}, State) ->
                 pieces_stored=NewStored},
             IState
     end,
-    {noreply, NewState};
+    {noreply, NewState}
+    end;
 
 handle_info({chunk, {fetched, _, _, _, _}}, State) ->
     {noreply, State};
