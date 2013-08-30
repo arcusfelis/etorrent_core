@@ -201,8 +201,8 @@ parse_url_test_() ->
                    parse_url("magnet:?xt=urn:btih:IXE2K3JMCPUZWTW3YQZZOIB5XD6KZIEQ"))
     ,?_assertEqual({1030803369114085151184244669493103882218552823476,
                                    "Jonathan Coulton - Discography",
-                                   ["udp://tracker.publicbt.com:80",
-                                    "udp://tracker.openbittorrent.com:80",
+                                   ["udp://tracker.openbittorrent.com:80",
+                                    "udp://tracker.publicbt.com:80",
                                     "udp://tracker.istole.it:6969",
                                     "udp://tracker.ccc.de:80"]},
                    parse_url(colton_url()))
