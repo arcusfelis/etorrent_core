@@ -45,8 +45,7 @@
     DN :: string() | undefined,
     TR :: string().
 parse_url(Url) ->
-%   {Scheme, _Netloc, _Path, Query, _Fragment} = ?URL_PARSER:urlsplit(Url),
-    {Scheme, _UserInfo, _Host, _Port, _Path, Query} = http_uri:parse(Url),
+    {Scheme, _Netloc, _Path, Query, _Fragment} = ?URL_PARSER:urlsplit(Url),
     case Scheme of
         "magnet" ->
             %% Get a parameter proplist. Keys and values are strings.
