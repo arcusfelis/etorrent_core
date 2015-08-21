@@ -76,6 +76,11 @@ init([PeerId]) ->
         true -> {ok,_} = application:ensure_all_started(azdht)
     end,
 
+    case etorrent_config:use_upnp() of
+        false -> ok;
+        true -> {ok,_} = application:ensure_all_started(upnp)
+    end,
+
     MDNSSup = case etorrent_config:mdns() of
         false -> [];
         true ->
