@@ -5,6 +5,6 @@ cd `dirname $0`
 exec erl -pa $PWD/ebin edit $PWD/deps/*/ebin \
     -boot start_sasl \
     -sname etorrent \
-    -s etorrent_app \
+    -eval "io:format(\"Starting ~p~n\", [application:ensure_all_started(etorrent_core)])." \
     -config ~/.config/etorrent
 

@@ -73,7 +73,7 @@ init([PeerId]) ->
 
     case etorrent_config:azdht() of
         false -> ok;
-        true -> application:start(azdht)
+        true -> application:ensure_all_started(azdht)
     end,
 
     MDNSSup = case etorrent_config:mdns() of
@@ -81,7 +81,7 @@ init([PeerId]) ->
         true ->
             ListenIP = etorrent_config:listen_ip(),
             application:set_env(mdns, interface_ip, ListenIP),
-            application:start(mdns),
+            application:ensure_all_started(mdns),
             [{mdns_sup,
                 {etorrent_mdns_sup, start_link, [PeerId]},
                 permanent, infinity, supervisor, [etorrent_mdns_sup]}]
