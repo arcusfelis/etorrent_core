@@ -92,21 +92,11 @@ init([PeerId]) ->
                 permanent, infinity, supervisor, [etorrent_mdns_sup]}]
     end,
 
-    %% UPnP subsystemm is optional.
-    UPNPSup = case etorrent_config:use_upnp() of
-        false -> [];
-        true ->
-            [{etorrent_upnp_sup,
-                {etorrent_upnp_sup, start_link, []},
-                permanent, infinity, supervisor, [etorrent_upnp_sup]}]
-    end,
-
     {ok, {{one_for_all, 3, 60},
           [Conf, Tables, Torrent, Tracker,
            Counters, EventManager, PeerMgr,
            FastResume, PeerStates,
            Choker, Listener, UdpTracking] 
-           ++ UPNPSup
            ++ DHTSup
            ++ MDNSSup
            ++ [TorrentPool, Ctl, DirWatcherSup, Console]}}.
